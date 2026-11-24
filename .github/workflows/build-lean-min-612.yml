@@ -1,0 +1,225 @@
+name: Build LEDE AX3000T (Lean source / KERNEL 6.12 / native big-partition / MINIMAL no plugins)
+
+# Lean (coolsnowwolf/lede) master 源码 + 原生大分区设备 xiaomi_mi-router-ax3000t。
+# 与 build-lean-minimal.yml 唯一区别：把 mediatek 默认内核 6.18 精确钉回 6.12，
+# 与主人当前 AX3000T 正在运行的 6.12.100 同系列（6.12 是 Lean 官方维护的 testing 内核，
+# patches-6.12 / files-6.12 目录齐全，完整支持）。
+# 纯净版：只保留 LuCI 基础界面 + 中文，零插件，验证"换回 6.12 内核能否启动"。
+# 产出 sysupgrade.bin，Release tag = lean-min612-build-N（独立，不污染 lean-build-N / lean-min-build-N）。
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  REPO_URL: https://github.com/coolsnowwolf/lede
+  REPO_BRANCH: master
+  DEVICE: xiaomi_mi-router-ax3000t
+  KERNEL_VER: "6.12"
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+            /opt/hostedtoolcache/CodeQL /usr/local/.ghcup /opt/hostedtoolcache/go \
+            /usr/local/go /usr/local/share/powershell
+          sudo docker image prune -af >/dev/null 2>&1 || true
+          df -h /
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get -y install build-essential clang flex bison g++ gawk gcc gettext git \
+            libncurses-dev libssl-dev libelf-dev make python3 python-is-python3 rsync unzip \
+            zlib1g-dev file swig wget curl
+
+      - name: Clone source (Lean lede master)
+        run: |
+          git clone --depth 1 -b $REPO_BRANCH $REPO_URL openwrt
+          cd openwrt
+          echo "=== source identity ==="
+          git log -1 --format="commit: %h %ad %s" --date=short
+
+      - name: "Pin kernel ${KERNEL_VER} (match running AX3000T 6.12.100)"
+        working-directory: openwrt
+        run: |
+          python3 - <<'PYEOF'
+          import os
+          ver = os.environ['KERNEL_VER']
+          p = 'target/linux/mediatek/Makefile'
+          s = open(p).read()
+          old = 'KERNEL_PATCHVER:=6.18'
+          new = 'KERNEL_PATCHVER:=' + ver
+          assert old in s, '!! KERNEL_PATCHVER:=6.18 not found - upstream Makefile changed, patch needs review'
+          open(p, 'w').write(s.replace(old, new, 1))
+          print('pinned mediatek KERNEL_PATCHVER 6.18 ->', ver)
+          PYEOF
+          grep -n 'KERNEL_PATCHVER\|KERNEL_TESTING_PATCHVER' target/linux/mediatek/Makefile
+          echo "=== confirm 6.12 patch/files dirs exist ==="
+          test -d target/linux/mediatek/patches-6.12 && echo "  OK patches-6.12"
+          test -d target/linux/mediatek/files-6.12 && echo "  OK files-6.12"
+
+      - name: "Init feeds (packages/luci/routing/telephony/video; helloworld removed)"
+        working-directory: openwrt
+        run: |
+          sed -i '/helloworld/s/^/#/' feeds.conf.default
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+
+      - name: Load config (MINIMAL - no plugins)
+        working-directory: openwrt
+        run: |
+          cp ../config/ax3000t-lean-minimal.config .config
+          make defconfig
+          grep -q "DEVICE_${DEVICE}=y" .config || { echo "!! device not selected"; exit 1; }
+
+          echo "=== confirm kernel line in .config ==="
+          grep -iE 'KERNEL_PATCHVER|LINUX_VERSION' .config || true
+          grep -m1 'linux-6' .config && echo "  (linux source ref present)" || true
+
+          echo "=== required base (must be present) ==="
+          for p in luci; do
+            grep -q "CONFIG_PACKAGE_${p}=y" .config || { echo "!! required package missing: $p"; exit 1; }
+            echo "  OK  $p"
+          done
+
+          echo ""
+          echo "=== FULL selected package list (purity audit) ==="
+          grep -E '^CONFIG_PACKAGE_.*=y$' .config | sed 's/^CONFIG_PACKAGE_//; s/=y$//' | sort
+          echo ""
+          echo "=== total selected packages ==="
+          grep -cE '^CONFIG_PACKAGE_.*=y$' .config
+
+          echo "=== unwanted plugins (must all be absent; kmod-tcp-bbr is a tiny kernel module allowed) ==="
+          if grep -qE "^CONFIG_PACKAGE_(luci-app-(homeproxy|passwall|passwall2|mosdns|argon-config|filetransfer|autoreboot|vlmcsd|frpc)|sing-box|luci-theme-argon|vlmcsd|frpc|mosdns|xray-core|v2ray-plugin|frps)=y" .config; then
+            echo "!! a plugin sneaked in on a MINIMAL build:"
+            grep -E "^CONFIG_PACKAGE_(luci-app-(homeproxy|passwall|passwall2|mosdns|argon-config|filetransfer|autoreboot|vlmcsd|frpc)|sing-box|luci-theme-argon|vlmcsd|frpc|mosdns|xray-core|v2ray-plugin|frps)=y" .config
+            exit 1
+          fi
+          echo "  OK  no plugins"
+
+      - name: Restore downloads cache
+        uses: actions/cache/restore@v4
+        with:
+          path: openwrt/dl
+          key: lean612-dl-${{ github.run_id }}
+          restore-keys: |
+            lean612-dl-
+            lean-dl-
+
+      - name: Download sources
+        working-directory: openwrt
+        run: |
+          make download -j16
+          find dl -size -1kc -delete || true
+          make download -j16
+
+      - name: Save downloads cache
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: openwrt/dl
+          key: lean612-dl-${{ github.run_id }}
+
+      - name: Restore toolchain cache
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            openwrt/staging_dir
+            openwrt/toolchain
+          key: lean612-toolchain-${{ github.run_id }}
+          restore-keys: |
+            lean612-toolchain-
+
+      - name: "Fix mac80211 Werror (harmless under 6.12 too)"
+        working-directory: openwrt
+        run: |
+          python3 - <<'PYEOF'
+          p = 'package/kernel/mac80211/Makefile'
+          s = open(p).read()
+          old = 'EXTRA_CFLAGS="-I$(PKG_BUILD_DIR)/include $(IREMAP_CFLAGS) $(C_DEFINES)"'
+          new = 'EXTRA_CFLAGS="-I$(PKG_BUILD_DIR)/include $(IREMAP_CFLAGS) $(C_DEFINES) -Wno-error=incompatible-pointer-types"'
+          assert old in s, '!! EXTRA_CFLAGS pattern not found - upstream Makefile changed, patch needs review'
+          open(p, 'w').write(s.replace(old, new, 1))
+          print('patched mac80211 Makefile: -Wno-error=incompatible-pointer-types')
+          PYEOF
+          grep -n 'Wno-error=incompatible-pointer-types' package/kernel/mac80211/Makefile
+
+      - name: Compile
+        working-directory: openwrt
+        run: |
+          make -j$(nproc) || {
+            echo "parallel build failed, retrying once"
+            make -j$(nproc) || {
+              echo "still failed, capture single-threaded log"
+              make -j1 V=s > ../build.log 2>&1 || true
+              tail -n 120 ../build.log
+              exit 1
+            }
+          }
+          echo "=== final kernel version ==="
+          grep -m1 'KERNEL_PATCHVER' target/linux/mediatek/Makefile
+          df -h /
+
+      - name: Save toolchain cache
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            openwrt/staging_dir
+            openwrt/toolchain
+          key: lean612-toolchain-${{ github.run_id }}
+
+      - name: Upload build log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: lean-min612-build-log-${{ github.run_number }}
+          path: |
+            build.log
+            openwrt/logs/**
+          if-no-files-found: ignore
+          retention-days: 14
+
+      - name: Collect output
+        run: |
+          STAMP=$(date +%Y%m%d-%H%M)
+          mkdir -p out
+          cp -r openwrt/bin/targets/mediatek/filogic/* out/
+          rm -rf out/packages out/sha256sums out/config.buildinfo out/feeds.buildinfo out/manifest out/version.buildinfo
+          for f in out/*; do mv "$f" "out/${STAMP}-LEANMIN612-${f##*/}"; done
+          ls -lh out/
+          test -n "$(find out -maxdepth 1 -type f -print -quit)" || { echo "!! no firmware files in out/, abort"; exit 1; }
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ax3000t-lean-min612-${{ github.run_number }}
+          path: out/
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: lean-min612-build-${{ github.run_number }}
+          name: AX3000T LEDE 纯净版(KERNEL 6.12) build-${{ github.run_number }}
+          body: |
+            Lean (coolsnowwolf/lede) master 源码 + 原生大分区设备 xiaomi_mi-router-ax3000t。
+            内核精确钉回 6.12（与主人当前 AX3000T 运行的 6.12.100 同系列）。
+            纯净版：只保留 LuCI 基础界面 + 中文，零插件。
+            目的：验证"换回 6.12 内核能否正常启动"。
+            - sysupgrade.bin : 系统内升级用（Lean 原生大分区）
+          files: out/*
+          make_latest: false
+          fail_on_unmatched_files: true
