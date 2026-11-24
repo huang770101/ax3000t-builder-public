@@ -122,6 +122,26 @@ jobs:
           restore-keys: |
             lean3-toolchain-
 
+      - name: "Fix mac80211 Werror (kernel 6.18 namespace signature mismatch)"
+        working-directory: openwrt
+        run: |
+          # Lean master currently pulls kernel 6.18.65 + backports 6.18.39.
+          # The 6.18 kernel changed the class.namespace callback to expect
+          # 'const struct ns_common *', but backports' wiphy_namespace() still
+          # returns 'const void *'. This is a harmless pointer-type mismatch
+          # (same pointer value at runtime) that -Werror promotes to a build
+          # error. Downgrade just this warning so mac80211 can compile.
+          python3 - <<'PYEOF'
+          p = 'package/kernel/mac80211/Makefile'
+          s = open(p).read()
+          old = 'EXTRA_CFLAGS="-I$(PKG_BUILD_DIR)/include $(IREMAP_CFLAGS) $(C_DEFINES)"'
+          new = 'EXTRA_CFLAGS="-I$(PKG_BUILD_DIR)/include $(IREMAP_CFLAGS) $(C_DEFINES) -Wno-error=incompatible-pointer-types"'
+          assert old in s, '!! EXTRA_CFLAGS pattern not found - upstream Makefile changed, patch needs review'
+          open(p, 'w').write(s.replace(old, new, 1))
+          print('patched mac80211 Makefile: -Wno-error=incompatible-pointer-types')
+          PYEOF
+          grep -n 'Wno-error=incompatible-pointer-types' package/kernel/mac80211/Makefile
+
       - name: Compile
         working-directory: openwrt
         run: |
@@ -137,7 +157,7 @@ jobs:
           df -h /
 
       - name: Save toolchain cache
-        if: success()
+        if: always()
         uses: actions/cache/save@v4
         with:
           path: |
