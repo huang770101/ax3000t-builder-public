@@ -1,0 +1,189 @@
+name: Build LEDE AX3000T (Lean source / native big-partition / HOMEPROXY + ARGON + BBR)
+
+# Lean (coolsnowwolf/lede) master 源码 + 原生大分区设备 xiaomi_mi-router-ax3000t。
+# 三件套：homeproxy + Argon + BBR，其余插件一律不装。
+# 产出 sysupgrade.bin（sysupgrade-tar），Release tag = lean-build-N（独立，不污染其他版本）。
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  REPO_URL: https://github.com/coolsnowwolf/lede
+  REPO_BRANCH: master
+  DEVICE: xiaomi_mi-router-ax3000t
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+            /opt/hostedtoolcache/CodeQL /usr/local/.ghcup /opt/hostedtoolcache/go \
+            /usr/local/go /usr/local/share/powershell
+          sudo docker image prune -af >/dev/null 2>&1 || true
+          df -h /
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get -y install build-essential clang flex bison g++ gawk gcc gettext git \
+            libncurses-dev libssl-dev libelf-dev make python3 python-is-python3 rsync unzip \
+            zlib1g-dev file swig wget curl
+
+      - name: Clone source (Lean lede master)
+        run: |
+          git clone --depth 1 -b $REPO_BRANCH $REPO_URL openwrt
+          cd openwrt
+          echo "=== source identity ==="
+          git log -1 --format="commit: %h %ad %s" --date=short
+
+      - name: "Init feeds (packages/luci/routing/telephony/video; helloworld removed)"
+        working-directory: openwrt
+        run: |
+          # helloworld feed carries passwall/ssr-plus; its INCLUDE_Xray option defaults
+          # to y on ARM and auto-pulls xray-core into .config. Homeproxy/sing-box/argon/BBR
+          # do NOT need helloworld at all -> drop it to keep xray-core out at the source.
+          sed -i '/helloworld/s/^/#/' feeds.conf.default
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+
+      - name: Load config (homeproxy + argon + BBR ONLY)
+        working-directory: openwrt
+        run: |
+          cp ../config/ax3000t-lean.config .config
+          make defconfig
+          grep -q "DEVICE_${DEVICE}=y" .config || { echo "!! device not selected"; exit 1; }
+
+          echo "=== required packages (must all be present) ==="
+          for p in luci-app-homeproxy sing-box firewall4 kmod-nft-tproxy ucode-mod-digest luci-theme-argon luci-app-argon-config kmod-tcp-bbr; do
+            grep -q "CONFIG_PACKAGE_${p}=y" .config || { echo "!! required package missing: $p"; grep -E "CONFIG_PACKAGE_${p}" .config || true; exit 1; }
+            echo "  OK  $p"
+          done
+
+          echo "=== unwanted packages (must all be absent) ==="
+          if grep -qE "^CONFIG_PACKAGE_(luci-app-passwall|luci-app-passwall2|luci-app-mosdns|mosdns|frpc|frps|xray-core|v2ray-plugin|ipv6helper|firewall)=y" .config; then
+            echo "!! an unwanted package sneaked in:"
+            grep -E "^CONFIG_PACKAGE_(luci-app-passwall|luci-app-passwall2|luci-app-mosdns|mosdns|frpc|frps|xray-core|v2ray-plugin|ipv6helper|firewall)=y" .config
+            exit 1
+          fi
+          echo "  OK  no unwanted plugins"
+          echo "config check passed"
+
+          echo ""
+          echo "=== FULL selected package list (purity audit) ==="
+          grep -E '^CONFIG_PACKAGE_.*=y$' .config | sed 's/^CONFIG_PACKAGE_//; s/=y$//' | sort
+          echo ""
+          echo "=== proxy/extra-plugin audit (should be EMPTY except homeproxy stack) ==="
+          grep -Ei '^CONFIG_PACKAGE_.*(passwall|ssr|shadow|v2ray|xray|trojan|hysteria|frp|mosdns|smartdns|chinadns|adguard|openclash|clash|tailscale|wireguard|naive|sing-box|homeproxy)=y' .config | sed 's/^CONFIG_PACKAGE_//; s/=y$//' | sort || true
+          echo ""
+          echo "=== residual check (should be EMPTY; if listed, dependency forced them back) ==="
+          grep -E '^CONFIG_PACKAGE_(luci-app-(ddns|filetransfer|nlbwmon|oui|package-manager|rclone|upnp|vlmcsd|vsftpd|wol|arpbind|autoreboot)|ddns-scripts|vlmcsd|vsftpd|etherwake|htop|coremark|curl|luci-theme-(bootstrap|design)|iptables|ip6tables|ipset)=y' .config | sed 's/^CONFIG_PACKAGE_//; s/=y$//' | sort || true
+          echo "=== total selected packages ==="
+          grep -cE '^CONFIG_PACKAGE_.*=y$' .config
+
+      - name: Restore downloads cache
+        uses: actions/cache/restore@v4
+        with:
+          path: openwrt/dl
+          key: lean-dl-${{ github.run_id }}
+          restore-keys: |
+            lean-dl-
+
+      - name: Download sources
+        working-directory: openwrt
+        run: |
+          make download -j16
+          find dl -size -1kc -delete || true
+          make download -j16
+
+      - name: Save downloads cache
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: openwrt/dl
+          key: lean-dl-${{ github.run_id }}
+
+      - name: Restore toolchain cache
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            openwrt/staging_dir
+            openwrt/toolchain
+          key: lean3-toolchain-${{ github.run_id }}
+          restore-keys: |
+            lean3-toolchain-
+
+      - name: Compile
+        working-directory: openwrt
+        run: |
+          make -j$(nproc) || {
+            echo "parallel build failed, retrying once"
+            make -j$(nproc) || {
+              echo "still failed, capture single-threaded log"
+              make -j1 V=s > ../build.log 2>&1 || true
+              tail -n 120 ../build.log
+              exit 1
+            }
+          }
+          df -h /
+
+      - name: Save toolchain cache
+        if: success()
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            openwrt/staging_dir
+            openwrt/toolchain
+          key: lean3-toolchain-${{ github.run_id }}
+
+      - name: Upload build log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: lean-build-log-${{ github.run_number }}
+          path: |
+            build.log
+            plugin-*.log
+            openwrt/logs/**
+          if-no-files-found: ignore
+          retention-days: 14
+
+      - name: Collect output
+        run: |
+          STAMP=$(date +%Y%m%d-%H%M)
+          mkdir -p out
+          cp -r openwrt/bin/targets/mediatek/filogic/* out/
+          rm -rf out/packages out/sha256sums out/config.buildinfo out/feeds.buildinfo out/manifest out/version.buildinfo
+          for f in out/*; do mv "$f" "out/${STAMP}-LEAN-${f##*/}"; done
+          ls -lh out/
+          test -n "$(find out -maxdepth 1 -type f -print -quit)" || { echo "!! no firmware files in out/, abort"; exit 1; }
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ax3000t-lean-${{ github.run_number }}
+          path: out/
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: lean-build-${{ github.run_number }}
+          name: AX3000T LEDE 大分区 HOMEPROXY + ARGON + BBR build-${{ github.run_number }}
+          body: |
+            Lean (coolsnowwolf/lede) master 源码 + 原生大分区设备 xiaomi_mi-router-ax3000t。
+            三件套：homeproxy（sing-box 全特性）+ Argon 主题 + BBR，其余插件一律不装。
+            - sysupgrade.bin : 系统内升级用（Lean 原生大分区，U-Boot 沿用现有 hanwckf）
+          files: out/*
+          make_latest: false
+          fail_on_unmatched_files: true
