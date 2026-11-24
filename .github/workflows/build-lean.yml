@@ -1,7 +1,8 @@
-name: Build LEDE AX3000T (Lean source / native big-partition / HOMEPROXY + ARGON + BBR)
+name: Build LEDE AX3000T (Lean source / native big-partition / HOMEPROXY + ARGON + BBR + EXTRAS)
 
 # Lean (coolsnowwolf/lede) master 源码 + 原生大分区设备 xiaomi_mi-router-ax3000t。
-# 三件套：homeproxy + Argon + BBR，其余插件一律不装。
+# 三件套：homeproxy + Argon + BBR；追加：filetransfer/autoreboot/vlmcsd/frpc(0.72.0)。
+# IPv6 由系统默认组件支持。其余插件一律不装。
 # 产出 sysupgrade.bin（sysupgrade-tar），Release tag = lean-build-N（独立，不污染其他版本）。
 
 on:
@@ -56,7 +57,31 @@ jobs:
           ./scripts/feeds update -a
           ./scripts/feeds install -a
 
-      - name: Load config (homeproxy + argon + BBR ONLY)
+      - name: "Bump frp to latest 0.72.0 (Lean feed ships 0.70.1)"
+        working-directory: openwrt
+        run: |
+          # Lean coolsnowwolf/packages feeds frp 0.70.1; user wants latest 0.72.0.
+          # Verified: go.mod needs go 1.26 (Lean golang feed = 1.27.3), front-end
+          # build scripts identical across both versions. Patch PKG_VERSION+HASH.
+          python3 - <<'PYEOF'
+          import glob
+          cands = glob.glob('feeds/packages/net/frp/Makefile') + glob.glob('package/feeds/packages/frp/Makefile')
+          assert cands, '!! frp Makefile not found after feeds install'
+          p = cands[0]
+          s = open(p).read()
+          oldv, newv = '0.70.1', '0.72.0'
+          oldh = '67246606f504cb15df72193f1a83911259e92b6a87838cff8850031efd406dc8'
+          newh = '20e2249c2b17cb7624317b0a9a0baed06c80c547d27568d18a32c78e46d79230'
+          assert 'PKG_VERSION:='+oldv in s, '!! frp version pattern not found (upstream moved)'
+          assert 'PKG_HASH:='+oldh in s, '!! frp hash pattern not found (upstream moved)'
+          s = s.replace('PKG_VERSION:='+oldv, 'PKG_VERSION:='+newv, 1)
+          s = s.replace('PKG_HASH:='+oldh, 'PKG_HASH:='+newh, 1)
+          open(p, 'w').write(s)
+          print('patched', p, '->', newv)
+          PYEOF
+          grep -E 'PKG_VERSION:=|PKG_HASH:=' feeds/packages/net/frp/Makefile | head -2
+
+      - name: Load config (homeproxy + argon + BBR + extras)
         working-directory: openwrt
         run: |
           cp ../config/ax3000t-lean.config .config
@@ -64,15 +89,15 @@ jobs:
           grep -q "DEVICE_${DEVICE}=y" .config || { echo "!! device not selected"; exit 1; }
 
           echo "=== required packages (must all be present) ==="
-          for p in luci-app-homeproxy sing-box firewall4 kmod-nft-tproxy ucode-mod-digest luci-theme-argon luci-app-argon-config kmod-tcp-bbr; do
+          for p in luci-app-homeproxy sing-box firewall4 kmod-nft-tproxy ucode-mod-digest luci-theme-argon luci-app-argon-config kmod-tcp-bbr luci-app-filetransfer luci-app-autoreboot luci-app-vlmcsd vlmcsd frpc luci-app-frpc; do
             grep -q "CONFIG_PACKAGE_${p}=y" .config || { echo "!! required package missing: $p"; grep -E "CONFIG_PACKAGE_${p}" .config || true; exit 1; }
             echo "  OK  $p"
           done
 
           echo "=== unwanted packages (must all be absent) ==="
-          if grep -qE "^CONFIG_PACKAGE_(luci-app-passwall|luci-app-passwall2|luci-app-mosdns|mosdns|frpc|frps|xray-core|v2ray-plugin|ipv6helper|firewall)=y" .config; then
+          if grep -qE "^CONFIG_PACKAGE_(luci-app-passwall|luci-app-passwall2|luci-app-mosdns|mosdns|frps|xray-core|v2ray-plugin|ipv6helper|firewall)=y" .config; then
             echo "!! an unwanted package sneaked in:"
-            grep -E "^CONFIG_PACKAGE_(luci-app-passwall|luci-app-passwall2|luci-app-mosdns|mosdns|frpc|frps|xray-core|v2ray-plugin|ipv6helper|firewall)=y" .config
+            grep -E "^CONFIG_PACKAGE_(luci-app-passwall|luci-app-passwall2|luci-app-mosdns|mosdns|frps|xray-core|v2ray-plugin|ipv6helper|firewall)=y" .config
             exit 1
           fi
           echo "  OK  no unwanted plugins"
@@ -82,11 +107,11 @@ jobs:
           echo "=== FULL selected package list (purity audit) ==="
           grep -E '^CONFIG_PACKAGE_.*=y$' .config | sed 's/^CONFIG_PACKAGE_//; s/=y$//' | sort
           echo ""
-          echo "=== proxy/extra-plugin audit (should be EMPTY except homeproxy stack) ==="
-          grep -Ei '^CONFIG_PACKAGE_.*(passwall|ssr|shadow|v2ray|xray|trojan|hysteria|frp|mosdns|smartdns|chinadns|adguard|openclash|clash|tailscale|wireguard|naive|sing-box|homeproxy)=y' .config | sed 's/^CONFIG_PACKAGE_//; s/=y$//' | sort || true
+          echo "=== proxy/extra-plugin audit (should show only homeproxy + frpc stacks) ==="
+          grep -Ei '^CONFIG_PACKAGE_.*(passwall|ssr|shadow|v2ray|xray|trojan|hysteria|mosdns|smartdns|chinadns|adguard|openclash|clash|tailscale|wireguard|naive|sing-box|homeproxy)=y' .config | sed 's/^CONFIG_PACKAGE_//; s/=y$//' | sort || true
           echo ""
           echo "=== residual check (should be EMPTY; if listed, dependency forced them back) ==="
-          grep -E '^CONFIG_PACKAGE_(luci-app-(ddns|filetransfer|nlbwmon|oui|package-manager|rclone|upnp|vlmcsd|vsftpd|wol|arpbind|autoreboot)|ddns-scripts|vlmcsd|vsftpd|etherwake|htop|coremark|curl|luci-theme-(bootstrap|design)|iptables|ip6tables|ipset)=y' .config | sed 's/^CONFIG_PACKAGE_//; s/=y$//' | sort || true
+          grep -E '^CONFIG_PACKAGE_(luci-app-(ddns|nlbwmon|oui|package-manager|rclone|upnp|vsftpd|wol|arpbind)|ddns-scripts|vsftpd|etherwake|htop|coremark|curl|luci-theme-(bootstrap|design)|iptables|ip6tables|ipset)=y' .config | sed 's/^CONFIG_PACKAGE_//; s/=y$//' | sort || true
           echo "=== total selected packages ==="
           grep -cE '^CONFIG_PACKAGE_.*=y$' .config
 
@@ -199,10 +224,12 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: lean-build-${{ github.run_number }}
-          name: AX3000T LEDE 大分区 HOMEPROXY + ARGON + BBR build-${{ github.run_number }}
+          name: AX3000T LEDE 大分区 HOMEPROXY+ARGON+BBR+EXTRAS build-${{ github.run_number }}
           body: |
             Lean (coolsnowwolf/lede) master 源码 + 原生大分区设备 xiaomi_mi-router-ax3000t。
-            三件套：homeproxy（sing-box 全特性）+ Argon 主题 + BBR，其余插件一律不装。
+            三件套：homeproxy（sing-box 全特性）+ Argon 主题 + BBR。
+            追加：filetransfer(文件管理) + autoreboot(定时启动) + vlmcsd(KMS) + frpc 0.72.0(内网穿透,含LuCI界面)。
+            IPv6 由系统默认组件(odhcp6c/odhcpd-ipv6only/luci-proto-ipv6)支持。其余插件一律不装。
             - sysupgrade.bin : 系统内升级用（Lean 原生大分区，U-Boot 沿用现有 hanwckf）
           files: out/*
           make_latest: false
