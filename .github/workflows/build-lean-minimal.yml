@@ -67,20 +67,20 @@ jobs:
             echo "  OK  $p"
           done
 
-          echo "=== unwanted plugins (must all be absent) ==="
-          if grep -qE "^CONFIG_PACKAGE_(luci-app-(homeproxy|passwall|passwall2|mosdns|argon-config|filetransfer|autoreboot|vlmcsd|frpc)|sing-box|luci-theme-argon|kmod-tcp-bbr|vlmcsd|frpc|mosdns|xray-core|v2ray-plugin|frps)=y" .config; then
-            echo "!! a plugin sneaked in on a MINIMAL build:"
-            grep -E "^CONFIG_PACKAGE_(luci-app-(homeproxy|passwall|passwall2|mosdns|argon-config|filetransfer|autoreboot|vlmcsd|frpc)|sing-box|luci-theme-argon|kmod-tcp-bbr|vlmcsd|frpc|mosdns|xray-core|v2ray-plugin|frps)=y" .config
-            exit 1
-          fi
-          echo "  OK  no plugins"
-
           echo ""
           echo "=== FULL selected package list (purity audit) ==="
           grep -E '^CONFIG_PACKAGE_.*=y$' .config | sed 's/^CONFIG_PACKAGE_//; s/=y$//' | sort
           echo ""
           echo "=== total selected packages ==="
           grep -cE '^CONFIG_PACKAGE_.*=y$' .config
+
+          echo "=== unwanted plugins (must all be absent; kmod-tcp-bbr is a tiny kernel module allowed) ==="
+          if grep -qE "^CONFIG_PACKAGE_(luci-app-(homeproxy|passwall|passwall2|mosdns|argon-config|filetransfer|autoreboot|vlmcsd|frpc)|sing-box|luci-theme-argon|vlmcsd|frpc|mosdns|xray-core|v2ray-plugin|frps)=y" .config; then
+            echo "!! a plugin sneaked in on a MINIMAL build:"
+            grep -E "^CONFIG_PACKAGE_(luci-app-(homeproxy|passwall|passwall2|mosdns|argon-config|filetransfer|autoreboot|vlmcsd|frpc)|sing-box|luci-theme-argon|vlmcsd|frpc|mosdns|xray-core|v2ray-plugin|frps)=y" .config
+            exit 1
+          fi
+          echo "  OK  no plugins"
 
       - name: Restore downloads cache
         uses: actions/cache/restore@v4
