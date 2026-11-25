@@ -87,7 +87,7 @@ jobs:
           repl2 = ('\tbmtd.mtd = mtd;\n\tmtk_bmt_replace_ops(mtd);\n\n'
                    '\tif (!of_property_read_u32(np, "mediatek,bmt-mtd-overridden-oobsize",\n'
                    '\t\t\t\t\t  &overridden_oobsize))\n'
-                   '\t\tif (overridden_oobsize < mtd->oobsize) {\n'
+                   '\t\tif (overridden_oobsize < bmtd.mtd->oobsize) {\n'
                    '\t\t\tbmtd.mtd->oobsize = overridden_oobsize;\n'
                    '\t\t\tpr_info("NMBM: mtd OOB size has been overridden to %luB\\n",\n'
                    '\t\t\t\t(long unsigned int)bmtd.mtd->oobsize);\n'
