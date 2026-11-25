@@ -198,6 +198,37 @@ jobs:
           PYEOF
           grep -n 'Wno-error=incompatible-pointer-types' package/kernel/mac80211/Makefile
 
+      - name: "Fix mac80211 backports for kernel 6.12 (sk_requests_wifi_status redefinition)"
+        working-directory: openwrt
+        run: |
+          # Lean maps BOTH 6.12 and 6.18 kernels to backports-6.18.39.
+          # Linux 6.12.119 already defines sk_requests_wifi_status in net/sock.h,
+          # so the backport copy (guarded < 6.16) collides -> compile error.
+          # Narrow the guard to < 6.12 so 6.12 kernels skip the backport.
+          mkdir -p package/kernel/mac80211/patches/subsys
+          python3 - <<'PYEOF'
+          lines = [
+              '--- a/backport-include/net/sock.h',
+              '+++ b/backport-include/net/sock.h',
+              '@@ -23,7 +23,7 @@',
+              ' #define sk_error_report(sk) LINUX_BACKPORT(sk_error_report(sk))',
+              ' #endif /* <= 5.14 */',
+              ' ',
+              '-#if LINUX_VERSION_IS_LESS(6,16,0)',
+              '+#if LINUX_VERSION_IS_LESS(6,12,0)',
+              ' static inline bool',
+              ' sk_requests_wifi_status(struct sock *sk)',
+              ' {',
+          ]
+          p = 'package/kernel/mac80211/patches/subsys/999-fix-sock-wifi-status-for-612.patch'
+          open(p, 'w').write('\n'.join(lines) + '\n')
+          print('wrote', p)
+          PYEOF
+          echo "=== patch installed ==="
+          cat -A package/kernel/mac80211/patches/subsys/999-fix-sock-wifi-status-for-612.patch
+          # 防呆：确认补丁只有一份
+          test "$(find package/kernel/mac80211/patches -name '*wifi-status-for-612*' | wc -l)" -eq 1
+
       - name: Compile
         working-directory: openwrt
         run: |
