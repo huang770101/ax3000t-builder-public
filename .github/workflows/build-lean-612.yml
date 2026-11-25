@@ -1,0 +1,330 @@
+name: Build LEDE AX3000T (kernel 6.12 / big-partition / 5 plugins)
+
+# 基于 build-lean-min-612-nmbm.yml（已刷机验证能启动的纯净版骨架）。
+# 与纯净版唯一差别：换带插件 config（argon + homeproxy + BBR + autoreboot + vlmcsd），
+# 其余全部沿用：6.12 pin + NMBM 双补丁 + mac80211 Werror + backports 6.12 修复。
+# 摘掉 helloworld feed（断 xray 来源）与 video feed（第7条软件源 404 坏源）。
+# BBR 开机启用：编译期注入 /etc/sysctl.d/99-bbr.conf。
+# Release tag = lean-build-N。
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  REPO_URL: https://github.com/coolsnowwolf/lede
+  REPO_BRANCH: master
+  DEVICE: xiaomi_mi-router-ax3000t
+  KERNEL_VER: "6.12"
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+            /opt/hostedtoolcache/CodeQL /usr/local/.ghcup /opt/hostedtoolcache/go \
+            /usr/local/go /usr/local/share/powershell
+          sudo docker image prune -af >/dev/null 2>&1 || true
+          df -h /
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get -y install build-essential clang flex bison g++ gawk gcc gettext git \
+            libncurses-dev libssl-dev libelf-dev make python3 python-is-python3 rsync unzip \
+            zlib1g-dev file swig wget curl
+
+      - name: Clone source (lede master, rolling - no commit pin)
+        run: |
+          git clone --depth 1 -b $REPO_BRANCH $REPO_URL openwrt
+          cd openwrt
+          echo "=== source identity ==="
+          git log -1 --format="commit: %h %ad %s" --date=short
+
+      - name: "Pin kernel ${KERNEL_VER}"
+        working-directory: openwrt
+        run: |
+          python3 - <<'PYEOF'
+          import os
+          ver = os.environ['KERNEL_VER']
+          p = 'target/linux/mediatek/Makefile'
+          s = open(p).read()
+          old = 'KERNEL_PATCHVER:=6.18'
+          new = 'KERNEL_PATCHVER:=' + ver
+          assert old in s, '!! KERNEL_PATCHVER:=6.18 not found - upstream Makefile changed, patch needs review'
+          open(p, 'w').write(s.replace(old, new, 1))
+          print('pinned mediatek KERNEL_PATCHVER 6.18 ->', ver)
+          PYEOF
+          grep -n 'KERNEL_PATCHVER\|KERNEL_TESTING_PATCHVER' target/linux/mediatek/Makefile
+          test -d target/linux/mediatek/patches-6.12 && echo "  OK patches-6.12"
+          test -d target/linux/mediatek/files-6.12 && echo "  OK files-6.12"
+
+      - name: "PATCH 1/2 - kernel mtk_bmt.c: support bmt-mtd-overridden-oobsize"
+        working-directory: openwrt
+        run: |
+          python3 - <<'PYEOF'
+          p = 'target/linux/generic/files/drivers/mtd/nand/mtk_bmt.c'
+          s = open(p).read()
+          anchor1 = 'int mtk_bmt_attach(struct mtd_info *mtd)\n{\n\tstruct device_node *np;\n\tint ret = 0;\n'
+          repl1   = 'int mtk_bmt_attach(struct mtd_info *mtd)\n{\n\tstruct device_node *np;\n\tint ret = 0;\n\tu32 overridden_oobsize = 0;\n'
+          assert s.count(anchor1) == 1, '!! anchor1 count != 1 (%d)' % s.count(anchor1)
+          s = s.replace(anchor1, repl1, 1)
+          anchor2 = '\tbmtd.mtd = mtd;\n\tmtk_bmt_replace_ops(mtd);\n\n\tbmtd.blk_size = mtd->erasesize;'
+          repl2 = ('\tbmtd.mtd = mtd;\n\tmtk_bmt_replace_ops(mtd);\n\n'
+                   '\tif (!of_property_read_u32(np, "mediatek,bmt-mtd-overridden-oobsize",\n'
+                   '\t\t\t\t\t  &overridden_oobsize))\n'
+                   '\t\tif (overridden_oobsize < bmtd.mtd->oobsize) {\n'
+                   '\t\t\tbmtd.mtd->oobsize = overridden_oobsize;\n'
+                   '\t\t\tpr_info("NMBM: mtd OOB size has been overridden to %luB\\n",\n'
+                   '\t\t\t\t(long unsigned int)bmtd.mtd->oobsize);\n'
+                   '\t\t}\n\n'
+                   '\tbmtd.blk_size = mtd->erasesize;')
+          assert s.count(anchor2) == 1, '!! anchor2 count != 1 (%d)' % s.count(anchor2)
+          s = s.replace(anchor2, repl2, 1)
+          open(p, 'w').write(s)
+          print('PATCH1 applied')
+          PYEOF
+          grep -n 'overridden_oobsize\|bmt-mtd-overridden-oobsize' target/linux/generic/files/drivers/mtd/nand/mtk_bmt.c
+
+      - name: "PATCH 2/2 - DTS: add mediatek,bmt-mtd-overridden-oobsize = <64>"
+        working-directory: openwrt
+        run: |
+          python3 - <<'PYEOF'
+          p = 'target/linux/mediatek/dts/mt7981b-xiaomi_mi-router.dtsi'
+          s = open(p).read()
+          anchor = '\t\tmediatek,nmbm;\n\t\tmediatek,bmt-max-ratio = <1>;\n\t\tmediatek,bmt-max-reserved-blocks = <64>;\n'
+          repl   = anchor + '\t\tmediatek,bmt-mtd-overridden-oobsize = <64>;\n'
+          assert s.count(anchor) == 1, '!! DTS anchor count != 1 (%d)' % s.count(anchor)
+          assert 'bmt-mtd-overridden-oobsize' not in s, '!! already patched'
+          open(p, 'w').write(s.replace(anchor, repl, 1))
+          print('PATCH2 applied')
+          PYEOF
+          grep -n -A4 'mediatek,nmbm' target/linux/mediatek/dts/mt7981b-xiaomi_mi-router.dtsi
+
+      - name: "Assert both NMBM fixes present before make"
+        working-directory: openwrt
+        run: |
+          grep -q 'bmt-mtd-overridden-oobsize' target/linux/generic/files/drivers/mtd/nand/mtk_bmt.c || { echo "!! PATCH1 missing"; exit 1; }
+          grep -q 'mediatek,bmt-mtd-overridden-oobsize = <64>' target/linux/mediatek/dts/mt7981b-xiaomi_mi-router.dtsi || { echo "!! PATCH2 missing"; exit 1; }
+          echo "OK both NMBM fixes present"
+
+      - name: "Init feeds (drop helloworld + video; keep packages/luci/routing/telephony)"
+        working-directory: openwrt
+        run: |
+          # helloworld carries passwall/ssr-plus + xray -> drop at source
+          sed -i '/helloworld/s/^/#/' feeds.conf.default
+          # video feed = the 7th software source (openwrt_video) that 404s on update
+          sed -i '/src-git video/s/^/#/' feeds.conf.default
+          echo "=== active feeds ==="
+          grep '^src-git' feeds.conf.default
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+
+      - name: Load config (5 plugins) + strict gate
+        working-directory: openwrt
+        run: |
+          cp ../config/ax3000t-lean-612.config .config
+          make defconfig
+          grep -q "DEVICE_${DEVICE}=y" .config || { echo "!! device not selected"; exit 1; }
+
+          echo "=== required packages (must all be present) ==="
+          for p in luci-app-homeproxy sing-box firewall4 kmod-nft-tproxy ucode-mod-digest \
+                   luci-theme-argon luci-app-argon-config kmod-tcp-bbr kmod-sched-fq \
+                   luci-app-autoreboot luci-app-vlmcsd vlmcsd; do
+            grep -q "CONFIG_PACKAGE_${p}=y" .config || { echo "!! required package missing: $p"; grep -E "CONFIG_PACKAGE_${p}" .config || true; exit 1; }
+            echo "  OK  $p"
+          done
+
+          echo "=== unwanted packages (must all be absent) ==="
+          if grep -qE "^CONFIG_PACKAGE_(luci-app-passwall|luci-app-passwall2|luci-app-mosdns|mosdns|frps|frpc|luci-app-frpc|luci-app-filetransfer|luci-app-turboacc|xray-core|v2ray-plugin|ipv6helper|firewall)=y" .config; then
+            echo "!! an unwanted package sneaked in:"
+            grep -E "^CONFIG_PACKAGE_(luci-app-passwall|luci-app-passwall2|luci-app-mosdns|mosdns|frps|frpc|luci-app-frpc|luci-app-filetransfer|luci-app-turboacc|xray-core|v2ray-plugin|ipv6helper|firewall)=y" .config
+            exit 1
+          fi
+          echo "  OK  no unwanted plugins"
+
+          echo "=== FULL selected package list ==="
+          grep -E '^CONFIG_PACKAGE_.*=y$' .config | sed 's/^CONFIG_PACKAGE_//; s/=y$//' | sort
+          echo "=== total selected packages ==="
+          grep -cE '^CONFIG_PACKAGE_.*=y$' .config
+
+      - name: "Inject BBR enable into rootfs (uci-defaults, boot enabled)"
+        working-directory: openwrt
+        run: |
+          # OpenWrt init reads /etc/sysctl.conf (not necessarily /etc/sysctl.d),
+          # so append there on first boot and apply immediately - same as the
+          # manual enable done on the running router.
+          mkdir -p files/etc/uci-defaults
+          cat > files/etc/uci-defaults/99-enable-bbr <<'EOF'
+          #!/bin/sh
+          grep -q '^net.ipv4.tcp_congestion_control' /etc/sysctl.conf || \
+            echo 'net.ipv4.tcp_congestion_control = bbr' >> /etc/sysctl.conf
+          grep -q '^net.core.default_qdisc' /etc/sysctl.conf || \
+            echo 'net.core.default_qdisc = fq' >> /etc/sysctl.conf
+          sysctl -w net.core.default_qdisc=fq >/dev/null 2>&1
+          sysctl -w net.ipv4.tcp_congestion_control=bbr >/dev/null 2>&1
+          exit 0
+          EOF
+          chmod +x files/etc/uci-defaults/99-enable-bbr
+          cat files/etc/uci-defaults/99-enable-bbr
+
+      - name: Restore downloads cache
+        uses: actions/cache/restore@v4
+        with:
+          path: openwrt/dl
+          key: lean612full-dl-${{ github.run_id }}
+          restore-keys: |
+            lean612full-dl-
+            lean612nmbm-dl-
+            lean612-dl-
+            lean-dl-
+
+      - name: Download sources
+        working-directory: openwrt
+        run: |
+          make download -j16
+          find dl -size -1kc -delete || true
+          make download -j16
+
+      - name: Save downloads cache
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: openwrt/dl
+          key: lean612full-dl-${{ github.run_id }}
+
+      - name: Restore toolchain cache
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            openwrt/staging_dir
+            openwrt/toolchain
+          key: lean612full-toolchain-${{ github.run_id }}
+          restore-keys: |
+            lean612full-toolchain-
+            lean612nmbm-toolchain-
+            lean612-toolchain-
+
+      - name: "Fix mac80211 Werror"
+        working-directory: openwrt
+        run: |
+          python3 - <<'PYEOF'
+          p = 'package/kernel/mac80211/Makefile'
+          s = open(p).read()
+          old = 'EXTRA_CFLAGS="-I$(PKG_BUILD_DIR)/include $(IREMAP_CFLAGS) $(C_DEFINES)"'
+          new = 'EXTRA_CFLAGS="-I$(PKG_BUILD_DIR)/include $(IREMAP_CFLAGS) $(C_DEFINES) -Wno-error=incompatible-pointer-types"'
+          assert old in s, '!! EXTRA_CFLAGS pattern not found - upstream changed'
+          open(p, 'w').write(s.replace(old, new, 1))
+          print('patched mac80211 Makefile')
+          PYEOF
+          grep -n 'Wno-error=incompatible-pointer-types' package/kernel/mac80211/Makefile
+
+      - name: "Fix mac80211 backports for kernel 6.12 (sk_requests_wifi_status redefinition)"
+        working-directory: openwrt
+        run: |
+          mkdir -p package/kernel/mac80211/patches/subsys
+          python3 - <<'PYEOF'
+          lines = [
+              '--- a/backport-include/net/sock.h',
+              '+++ b/backport-include/net/sock.h',
+              '@@ -23,7 +23,7 @@',
+              ' #define sk_error_report(sk) LINUX_BACKPORT(sk_error_report(sk))',
+              ' #endif /* <= 5.14 */',
+              ' ',
+              '-#if LINUX_VERSION_IS_LESS(6,16,0)',
+              '+#if LINUX_VERSION_IS_LESS(6,12,0)',
+              ' static inline bool',
+              ' sk_requests_wifi_status(struct sock *sk)',
+              ' {',
+          ]
+          p = 'package/kernel/mac80211/patches/subsys/999-fix-sock-wifi-status-for-612.patch'
+          open(p, 'w').write('\n'.join(lines) + '\n')
+          print('wrote', p)
+          PYEOF
+          cat -A package/kernel/mac80211/patches/subsys/999-fix-sock-wifi-status-for-612.patch
+          test "$(find package/kernel/mac80211/patches -name '*wifi-status-for-612*' | wc -l)" -eq 1
+
+      - name: Compile
+        working-directory: openwrt
+        run: |
+          make -j$(nproc) || {
+            echo "parallel build failed, retrying once"
+            make -j$(nproc) || {
+              echo "still failed, capture single-threaded log"
+              make -j1 V=s > ../build.log 2>&1 || true
+              tail -n 120 ../build.log
+              exit 1
+            }
+          }
+          echo "=== final kernel version ==="
+          grep -m1 'KERNEL_PATCHVER' target/linux/mediatek/Makefile
+          df -h /
+
+      - name: Save toolchain cache
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            openwrt/staging_dir
+            openwrt/toolchain
+          key: lean612full-toolchain-${{ github.run_id }}
+
+      - name: Upload build log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: lean612full-build-log-${{ github.run_number }}
+          path: |
+            build.log
+            openwrt/logs/**
+          if-no-files-found: ignore
+          retention-days: 14
+
+      - name: Collect output
+        run: |
+          STAMP=$(date +%Y%m%d-%H%M)
+          mkdir -p out
+          cp -r openwrt/bin/targets/mediatek/filogic/* out/
+          rm -rf out/packages out/sha256sums out/config.buildinfo out/feeds.buildinfo out/manifest out/version.buildinfo
+          for f in out/*; do mv "$f" "out/${STAMP}-LEAN612FULL-${f##*/}"; done
+          ls -lh out/
+          test -n "$(find out -maxdepth 1 -type f -print -quit)" || { echo "!! no firmware in out/, abort"; exit 1; }
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ax3000t-lean612full-${{ github.run_number }}
+          path: out/
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: lean-build-${{ github.run_number }}
+          name: AX3000T LEDE 正式版(内核6.12+大分区+5插件) build-${{ github.run_number }}
+          body: |
+            lede (coolsnowwolf/lede) master 滚动最新 + 原生大分区 xiaomi_mi-router-ax3000t。
+            内核 pin 6.12；已打 NMBM 双补丁 + mac80211 backports 6.12 修复（同已验证纯净版）。
+            插件 5 项：Argon 主题 + homeproxy(含 sing-box) + BBR(开机自启) + autoreboot + vlmcsd。
+            不编：filetransfer / frpc / turboacc / passwall / mosdns / xray；IPv6 原生自带。
+            已摘 helloworld + video 两条 feed（video 即原第7条 404 坏源）。
+
+            刷机后验收命令：
+              uname -r                                  → 6.12.x
+              df -h /overlay                            → 看剩余空间
+              sysctl net.ipv4.tcp_congestion_control    → bbr
+              ps w | grep sing-box                      → homeproxy 未在 LuCI 启用前无进程属正常
+            注意：本版无 frpc，云端 1021 隧道将断，验收需本地进行。
+          files: out/*
+          make_latest: false
+          fail_on_unmatched_files: true
