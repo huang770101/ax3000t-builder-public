@@ -1,0 +1,279 @@
+name: Build LEDE AX3000T (Lean / KERNEL 6.12 / NMBM Winbond fix / MINIMAL no plugins)
+
+# 基于 build-lean-min-612.yml，唯一新增：给 Lean master 打 OpenWrt 官方双段 NMBM 修复。
+# 根因：本机 AX3000T = Winbond W25N01KV NAND（OOB=96），U-Boot 按 64B OOB 写 NMBM 签名，
+#       Linux 按 96B 读 → "NMBM configuration mismatch" → UBI 起不来 → bootloop。
+# 修复（OpenWrt commit e585ae70 + 3299d19c / 24.10 回拾 db30b60）：
+#   段1 内核 mtk_bmt.c：mtk_bmt_attach() 读 mediatek,bmt-mtd-overridden-oobsize 并覆盖 oobsize=64
+#   段2 DTS：AX3000T 的 spi_nand 节点加 mediatek,bmt-mtd-overridden-oobsize = <64>;
+# Lean master 两段全缺（2026-11-25 源码逐行核对），故手动补上。
+# 纯净版：零插件；内核 6.12 与本机 6.12.100 同系列。Release tag = lean-min612nmbm-build-N。
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  REPO_URL: https://github.com/coolsnowwolf/lede
+  REPO_BRANCH: master
+  DEVICE: xiaomi_mi-router-ax3000t
+  KERNEL_VER: "6.12"
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+            /opt/hostedtoolcache/CodeQL /usr/local/.ghcup /opt/hostedtoolcache/go \
+            /usr/local/go /usr/local/share/powershell
+          sudo docker image prune -af >/dev/null 2>&1 || true
+          df -h /
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get -y install build-essential clang flex bison g++ gawk gcc gettext git \
+            libncurses-dev libssl-dev libelf-dev make python3 python-is-python3 rsync unzip \
+            zlib1g-dev file swig wget curl
+
+      - name: Clone source (Lean lede master)
+        run: |
+          git clone --depth 1 -b $REPO_BRANCH $REPO_URL openwrt
+          cd openwrt
+          echo "=== source identity ==="
+          git log -1 --format="commit: %h %ad %s" --date=short
+
+      - name: "Pin kernel ${KERNEL_VER} (match running AX3000T 6.12.100)"
+        working-directory: openwrt
+        run: |
+          python3 - <<'PYEOF'
+          import os
+          ver = os.environ['KERNEL_VER']
+          p = 'target/linux/mediatek/Makefile'
+          s = open(p).read()
+          old = 'KERNEL_PATCHVER:=6.18'
+          new = 'KERNEL_PATCHVER:=' + ver
+          assert old in s, '!! KERNEL_PATCHVER:=6.18 not found - upstream Makefile changed, patch needs review'
+          open(p, 'w').write(s.replace(old, new, 1))
+          print('pinned mediatek KERNEL_PATCHVER 6.18 ->', ver)
+          PYEOF
+          grep -n 'KERNEL_PATCHVER\|KERNEL_TESTING_PATCHVER' target/linux/mediatek/Makefile
+          echo "=== confirm 6.12 patch/files dirs exist ==="
+          test -d target/linux/mediatek/patches-6.12 && echo "  OK patches-6.12"
+          test -d target/linux/mediatek/files-6.12 && echo "  OK files-6.12"
+
+      - name: "PATCH 1/2 - kernel mtk_bmt.c: support bmt-mtd-overridden-oobsize"
+        working-directory: openwrt
+        run: |
+          python3 - <<'PYEOF'
+          p = 'target/linux/generic/files/drivers/mtd/nand/mtk_bmt.c'
+          s = open(p).read()
+
+          anchor1 = 'int mtk_bmt_attach(struct mtd_info *mtd)\n{\n\tstruct device_node *np;\n\tint ret = 0;\n'
+          repl1   = 'int mtk_bmt_attach(struct mtd_info *mtd)\n{\n\tstruct device_node *np;\n\tint ret = 0;\n\tu32 overridden_oobsize = 0;\n'
+          assert s.count(anchor1) == 1, '!! anchor1 count != 1 (%d) - upstream changed' % s.count(anchor1)
+          s = s.replace(anchor1, repl1, 1)
+
+          anchor2 = '\tbmtd.mtd = mtd;\n\tmtk_bmt_replace_ops(mtd);\n\n\tbmtd.blk_size = mtd->erasesize;'
+          repl2 = ('\tbmtd.mtd = mtd;\n\tmtk_bmt_replace_ops(mtd);\n\n'
+                   '\tif (!of_property_read_u32(np, "mediatek,bmt-mtd-overridden-oobsize",\n'
+                   '\t\t\t\t\t  &overridden_oobsize))\n'
+                   '\t\tif (overridden_oobsize < mtd->oobsize) {\n'
+                   '\t\t\tbmtd.mtd->oobsize = overridden_oobsize;\n'
+                   '\t\t\tpr_info("NMBM: mtd OOB size has been overridden to %luB\\n",\n'
+                   '\t\t\t\t(long unsigned int)bmtd.mtd->oobsize);\n'
+                   '\t\t}\n\n'
+                   '\tbmtd.blk_size = mtd->erasesize;')
+          assert s.count(anchor2) == 1, '!! anchor2 count != 1 (%d) - upstream changed' % s.count(anchor2)
+          s = s.replace(anchor2, repl2, 1)
+
+          open(p, 'w').write(s)
+          print('PATCH1 applied: mtk_bmt.c overrides oobsize from DTS property')
+          PYEOF
+          echo "=== verify PATCH 1 ==="
+          grep -n 'overridden_oobsize\|bmt-mtd-overridden-oobsize' target/linux/generic/files/drivers/mtd/nand/mtk_bmt.c
+
+      - name: "PATCH 2/2 - DTS: add mediatek,bmt-mtd-overridden-oobsize = <64>"
+        working-directory: openwrt
+        run: |
+          python3 - <<'PYEOF'
+          p = 'target/linux/mediatek/dts/mt7981b-xiaomi_mi-router.dtsi'
+          s = open(p).read()
+          anchor = '\t\tmediatek,nmbm;\n\t\tmediatek,bmt-max-ratio = <1>;\n\t\tmediatek,bmt-max-reserved-blocks = <64>;\n'
+          repl   = anchor + '\t\tmediatek,bmt-mtd-overridden-oobsize = <64>;\n'
+          assert s.count(anchor) == 1, '!! DTS anchor count != 1 (%d) - upstream changed' % s.count(anchor)
+          assert 'bmt-mtd-overridden-oobsize' not in s, '!! DTS already has property, refusing double patch'
+          open(p, 'w').write(s.replace(anchor, repl, 1))
+          print('PATCH2 applied: DTS oobsize override = 64')
+          PYEOF
+          echo "=== verify PATCH 2 ==="
+          grep -n -A4 'mediatek,nmbm' target/linux/mediatek/dts/mt7981b-xiaomi_mi-router.dtsi
+
+      - name: "Assert both NMBM fixes present before make"
+        working-directory: openwrt
+        run: |
+          grep -q 'bmt-mtd-overridden-oobsize' target/linux/generic/files/drivers/mtd/nand/mtk_bmt.c || { echo "!! PATCH1 missing"; exit 1; }
+          grep -q 'mediatek,bmt-mtd-overridden-oobsize = <64>' target/linux/mediatek/dts/mt7981b-xiaomi_mi-router.dtsi || { echo "!! PATCH2 missing"; exit 1; }
+          echo "OK both NMBM fixes present"
+
+      - name: "Init feeds (packages/luci/routing/telephony/video; helloworld removed)"
+        working-directory: openwrt
+        run: |
+          sed -i '/helloworld/s/^/#/' feeds.conf.default
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+
+      - name: Load config (MINIMAL - no plugins)
+        working-directory: openwrt
+        run: |
+          cp ../config/ax3000t-lean-minimal.config .config
+          make defconfig
+          grep -q "DEVICE_${DEVICE}=y" .config || { echo "!! device not selected"; exit 1; }
+          echo "=== FULL selected package list (purity audit) ==="
+          grep -E '^CONFIG_PACKAGE_.*=y$' .config | sed 's/^CONFIG_PACKAGE_//; s/=y$//' | sort
+          echo "=== total selected packages ==="
+          grep -cE '^CONFIG_PACKAGE_.*=y$' .config
+          echo "=== unwanted plugins (must all be absent) ==="
+          if grep -qE "^CONFIG_PACKAGE_(luci-app-(homeproxy|passwall|passwall2|mosdns|argon-config|filetransfer|autoreboot|vlmcsd|frpc)|sing-box|luci-theme-argon|vlmcsd|frpc|mosdns|xray-core|v2ray-plugin|frps)=y" .config; then
+            echo "!! a plugin sneaked in on a MINIMAL build"
+            exit 1
+          fi
+          echo "  OK  no plugins"
+
+      - name: Restore downloads cache
+        uses: actions/cache/restore@v4
+        with:
+          path: openwrt/dl
+          key: lean612nmbm-dl-${{ github.run_id }}
+          restore-keys: |
+            lean612nmbm-dl-
+            lean612-dl-
+            lean-dl-
+
+      - name: Download sources
+        working-directory: openwrt
+        run: |
+          make download -j16
+          find dl -size -1kc -delete || true
+          make download -j16
+
+      - name: Save downloads cache
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: openwrt/dl
+          key: lean612nmbm-dl-${{ github.run_id }}
+
+      - name: Restore toolchain cache
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            openwrt/staging_dir
+            openwrt/toolchain
+          key: lean612nmbm-toolchain-${{ github.run_id }}
+          restore-keys: |
+            lean612nmbm-toolchain-
+            lean612-toolchain-
+
+      - name: "Fix mac80211 Werror"
+        working-directory: openwrt
+        run: |
+          python3 - <<'PYEOF'
+          p = 'package/kernel/mac80211/Makefile'
+          s = open(p).read()
+          old = 'EXTRA_CFLAGS="-I$(PKG_BUILD_DIR)/include $(IREMAP_CFLAGS) $(C_DEFINES)"'
+          new = 'EXTRA_CFLAGS="-I$(PKG_BUILD_DIR)/include $(IREMAP_CFLAGS) $(C_DEFINES) -Wno-error=incompatible-pointer-types"'
+          assert old in s, '!! EXTRA_CFLAGS pattern not found - upstream Makefile changed, patch needs review'
+          open(p, 'w').write(s.replace(old, new, 1))
+          print('patched mac80211 Makefile')
+          PYEOF
+          grep -n 'Wno-error=incompatible-pointer-types' package/kernel/mac80211/Makefile
+
+      - name: Compile
+        working-directory: openwrt
+        run: |
+          make -j$(nproc) || {
+            echo "parallel build failed, retrying once"
+            make -j$(nproc) || {
+              echo "still failed, capture single-threaded log"
+              make -j1 V=s > ../build.log 2>&1 || true
+              tail -n 120 ../build.log
+              exit 1
+            }
+          }
+          echo "=== final kernel version ==="
+          grep -m1 'KERNEL_PATCHVER' target/linux/mediatek/Makefile
+          echo "=== NMBM fixes still present after make ==="
+          grep -c 'bmt-mtd-overridden-oobsize' target/linux/generic/files/drivers/mtd/nand/mtk_bmt.c
+          grep -c 'mediatek,bmt-mtd-overridden-oobsize = <64>' target/linux/mediatek/dts/mt7981b-xiaomi_mi-router.dtsi
+          df -h /
+
+      - name: Save toolchain cache
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            openwrt/staging_dir
+            openwrt/toolchain
+          key: lean612nmbm-toolchain-${{ github.run_id }}
+
+      - name: Upload build log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: lean-min612nmbm-build-log-${{ github.run_number }}
+          path: |
+            build.log
+            openwrt/logs/**
+          if-no-files-found: ignore
+          retention-days: 14
+
+      - name: Collect output
+        run: |
+          STAMP=$(date +%Y%m%d-%H%M)
+          mkdir -p out
+          cp -r openwrt/bin/targets/mediatek/filogic/* out/
+          rm -rf out/packages out/sha256sums out/config.buildinfo out/feeds.buildinfo out/manifest out/version.buildinfo
+          for f in out/*; do mv "$f" "out/${STAMP}-LEANMIN612NMBM-${f##*/}"; done
+          ls -lh out/
+          test -n "$(find out -maxdepth 1 -type f -print -quit)" || { echo "!! no firmware files in out/, abort"; exit 1; }
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ax3000t-lean-min612nmbm-${{ github.run_number }}
+          path: out/
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: lean-min612nmbm-build-${{ github.run_number }}
+          name: AX3000T LEDE 纯净版(KERNEL 6.12 + NMBM fix) build-${{ github.run_number }}
+          body: |
+            Lean (coolsnowwolf/lede) master + 原生大分区 xiaomi_mi-router-ax3000t。
+            内核 6.12（与本机 6.12.100 同系列）；零插件纯净版。
+            已打 OpenWrt 官方 Winbond NAND NMBM 双段修复（e585ae70 + 3299d19c）：
+              - mtk_bmt.c 支持 mediatek,bmt-mtd-overridden-oobsize
+              - AX3000T DTS 加 mediatek,bmt-mtd-overridden-oobsize = <64>
+            目的：修复本机 Winbond NAND "NMBM configuration mismatch" 导致的 bootloop。
+
+            刷机后验收命令：
+              dmesg | grep -i nmbm
+                → 应见 "NMBM: mtd OOB size has been overridden to 64B" 与 "NMBM has been successfully attached"
+                → 不应再是 "NMBM configuration mismatch"
+              df -h /overlay
+                → 可用空间应 ≥50M
+          files: out/*
+          make_latest: false
+          fail_on_unmatched_files: true
