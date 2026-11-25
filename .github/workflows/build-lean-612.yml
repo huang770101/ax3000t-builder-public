@@ -137,8 +137,10 @@ jobs:
           grep -q "DEVICE_${DEVICE}=y" .config || { echo "!! device not selected"; exit 1; }
 
           echo "=== required packages (must all be present) ==="
+          # NOTE: no kmod-sched-fq here - lede master dropped that standalone package;
+          # fq qdisc is built into 6.12 kernel, BBR only needs kmod-tcp-bbr.
           for p in luci-app-homeproxy sing-box firewall4 kmod-nft-tproxy ucode-mod-digest \
-                   luci-theme-argon luci-app-argon-config kmod-tcp-bbr kmod-sched-fq \
+                   luci-theme-argon luci-app-argon-config kmod-tcp-bbr \
                    luci-app-autoreboot luci-app-vlmcsd vlmcsd; do
             grep -q "CONFIG_PACKAGE_${p}=y" .config || { echo "!! required package missing: $p"; grep -E "CONFIG_PACKAGE_${p}" .config || true; exit 1; }
             echo "  OK  $p"
