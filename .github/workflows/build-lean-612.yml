@@ -312,8 +312,8 @@ jobs:
       - name: Publish release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: lean-build-${{ github.run_number }}
-          name: AX3000T LEDE 正式版(内核6.12+大分区+5插件) build-${{ github.run_number }}
+          tag_name: lean-612full-build-${{ github.run_number }}
+          name: AX3000T LEDE 正式版(内核6.12+大分区+5插件) lean-612full-build-${{ github.run_number }}
           body: |
             lede (coolsnowwolf/lede) master 滚动最新 + 原生大分区 xiaomi_mi-router-ax3000t。
             内核 pin 6.12；已打 NMBM 双补丁 + mac80211 backports 6.12 修复（同已验证纯净版）。
