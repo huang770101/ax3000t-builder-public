@@ -131,6 +131,17 @@ jobs:
           ./scripts/feeds update -a
           ./scripts/feeds install -a
 
+          # CRITICAL: passwall marks many proxy cores "default y if aarch64"
+          # (Xray / ShadowsocksR / SimpleObfs / V2rayPlugin / Haproxy / SmartDNS...).
+          # make defconfig then turns them on even with "is not set" in the seed config.
+          # Force ALL passwall optional cores to default n; we opt in ONLY SingBox +
+          # Geoview + Nftables proxy explicitly in ax3000t-lean-612pw.config.
+          PW_MK="feeds/passwall_luci/luci-app-passwall/Makefile"
+          test -f "$PW_MK" || { echo "!! passwall Makefile missing at $PW_MK"; find feeds -path '*luci-app-passwall/Makefile' 2>/dev/null; exit 1; }
+          sed -i -E 's/^([[:space:]]*)default y([[:space:]]+if .*)?$/\1default n/' "$PW_MK"
+          echo "=== passwall optional core defaults (all should be default n) ==="
+          grep -nE '^[[:space:]]*(config PACKAGE_|default [yn])' "$PW_MK" | head -60
+
       - name: "Load config (passwall version) + strict gate"
         working-directory: openwrt
         run: |
@@ -154,6 +165,8 @@ jobs:
           echo "  OK  sing-box + geoview + nftables proxy"
 
           echo "=== unwanted packages (must all be absent) ==="
+          echo "--- diagnostic: all proxy-core related lines in .config ---"
+          grep -iE 'xray|shadowsock|hysteria|naiveproxy|smartdns|haproxy|simple-obfs|v2ray|turboacc|homeproxy|frpc' .config || true
           if grep -qE '^CONFIG_PACKAGE_(luci-app-homeproxy|luci-app-passwall2|luci-app-filetransfer|frpc|luci-app-frpc|frps|luci-app-turboacc|xray-core|xray-plugin|v2ray-plugin|ipv6helper|firewall|smartdns|shadowsocks-rust-sslocal|shadowsocksr-libev-ssr-local|naiveproxy|hysteria|haproxy|simple-obfs-client|shadow-tls)=y' .config; then
             echo "!! an unwanted package sneaked in:"
             grep -E '^CONFIG_PACKAGE_(luci-app-homeproxy|luci-app-passwall2|luci-app-filetransfer|frpc|luci-app-frpc|frps|luci-app-turboacc|xray-core|xray-plugin|v2ray-plugin|ipv6helper|firewall|smartdns|shadowsocks-rust-sslocal|shadowsocksr-libev-ssr-local|naiveproxy|hysteria|haproxy|simple-obfs-client|shadow-tls)=y' .config
