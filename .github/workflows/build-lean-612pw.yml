@@ -366,7 +366,6 @@ jobs:
               ps w | grep sing-box                      → passwall 未在 LuCI 启用前无进程属正常
             DNS 配置提醒：dnsmasq / chinadns-ng / mosdns 三者共存，刷机后需自行配好转发链
             （建议 mosdns 只做广告过滤或特定域名分流，全量分流交给 passwall 的 chinadns-ng），配错会全网变慢。
-            注意：本版无 frpc，云端 1021 隧道将断，验收需本地进行。
           files: out/*
           make_latest: false
           fail_on_unmatched_files: true
