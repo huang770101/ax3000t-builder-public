@@ -1,11 +1,11 @@
-name: Build LEDE AX3000T (kernel 6.12 / big-partition / passwall + mosdns)
+name: Build LEDE AX3000T (kernel 6.12 / big-partition / passwall + frpc)
 
-# 基于 build-lean-612.yml（已编译成功的 6.12 + 5 插件骨架）。
-# 本次按主人 2026-11-26 确认单：homeproxy -> passwall，内核只留
-# sing-box / geoview / chinadns-ng，加 mosdns；其余插件不变。
-# feed：加 passwall_packages + passwall_luci 两条；恢复 helloworld（只取 mosdns，
-# 其余包 config 里全 not set）；继续摘 video（第7条 404 坏源）。
-# 内核/patch/BBR 注入全部沿用成功骨架。tag = lean-612pw-build-N。
+# 基于 build-lean-612pw.yml（已编译成功的 passwall 版）。
+# 本次按主人 2026-11-27 确认单：去 mosdns、加 frpc 0.72.0（不要中文语言包）；其余不变。
+# 内核只留 sing-box / geoview / chinadns-ng；feed 加 passwall_packages + passwall_luci。
+# 摘源：① video（第7条 404 坏源）注释；② passwall 两条源用 CONFIG_FEED_*=m 生成注释行，
+# 出厂固件 distfeeds.conf 就不带 404 坏源（opkg update 全绿）。
+# 内核/patch/BBR 注入全部沿用成功骨架。tag = lean-612pw-frpc-build-N。
 
 on:
   workflow_dispatch:
@@ -123,12 +123,10 @@ jobs:
           # passwall official feeds (author README: main + core packages)
           sed -i '1i src-git passwall_packages https://github.com/Openwrt-Passwall/openwrt-passwall-packages.git;main' feeds.conf.default
           sed -i '2i src-git passwall_luci https://github.com/Openwrt-Passwall/openwrt-passwall.git;main' feeds.conf.default
-          # helloworld DROPPED entirely: it was only assumed to be mosdns's source,
-          # but mosdns actually installs from lede's own "packages" feed, and
-          # chinadns-ng/geoview/sing-box come from passwall_packages. helloworld
-          # contributes NOTHING we need and its ssr-plus choice-block force-selects
-          # xray-core (主人明确不要). Removing the feed kills the pollution at root.
-          # video feed = the 7th software source (openwrt_video) that 404s on update -> drop
+          # helloworld DROPPED entirely: ssr-plus choice-block force-selects xray-core (主人明确不要).
+          # video feed = the 7th software source (openwrt_video) that 404s on update -> drop.
+          # NOTE: passwall feeds stay ACTIVE here (needed to compile the packages); their opkg
+          # *runtime* sources are suppressed later via CONFIG_FEED_*=m (see strict gate step).
           sed -i '/src-git helloworld/s/^/#/' feeds.conf.default
           sed -i '/src-git video/s/^/#/' feeds.conf.default
           echo "=== active feeds ==="
@@ -148,27 +146,80 @@ jobs:
           grep -nE '^[[:space:]]*(config PACKAGE_|default [yn])' "$PW_MK" | head -60
 
           # sanity: needed packages must be available from the kept feeds
-          for p in mosdns chinadns-ng geoview sing-box; do
+          for p in chinadns-ng geoview sing-box; do
             test -f "package/feeds/packages/$p/Makefile" || test -f "package/feeds/passwall_packages/$p/Makefile" || {
               echo "!! $p package missing from enabled feeds"; exit 1; }
             echo "  OK $p available"
           done
+          # frpc/frp comes from lede's own packages feed
+          test -f package/feeds/packages/frp/Makefile || { echo "!! frp Makefile missing"; exit 1; }
+          echo "  OK frp (frpc) available"
 
-      - name: "Load config (passwall version) + strict gate"
+      - name: "Bump frp to 0.72.0 (Lean feed ships 0.70.1)"
+        working-directory: openwrt
+        run: |
+          # Verified in prior lean-build-3: go.mod needs go 1.26 (Lean golang = 1.27.3),
+          # front-end build identical across versions. Patch PKG_VERSION + PKG_HASH.
+          python3 - <<'PYEOF'
+          p = 'feeds/packages/net/frp/Makefile'
+          s = open(p).read()
+          oldv, newv = '0.70.1', '0.72.0'
+          oldh = '67246606f504cb15df72193f1a83911259e92b6a87838cff8850031efd406dc8'
+          newh = '20e2249c2b17cb7624317b0a9a0baed06c80c547d27568d18a32c78e46d79230'
+          assert 'PKG_VERSION:='+oldv in s, '!! frp version pattern not found (upstream moved)'
+          assert 'PKG_HASH:='+oldh in s, '!! frp hash pattern not found (upstream moved)'
+          s = s.replace('PKG_VERSION:='+oldv, 'PKG_VERSION:='+newv, 1)
+          s = s.replace('PKG_HASH:='+oldh, 'PKG_HASH:='+newh, 1)
+          open(p, 'w').write(s)
+          print('patched', p, '->', newv)
+          PYEOF
+          grep -E 'PKG_VERSION:=|PKG_HASH:=' feeds/packages/net/frp/Makefile | head -2
+
+      - name: "Load config (passwall + frpc version) + strict gate"
         working-directory: openwrt
         run: |
           cp ../config/ax3000t-lean-612pw.config .config
           make defconfig
           grep -q "DEVICE_${DEVICE}=y" .config || { echo "!! device not selected"; exit 1; }
 
+          # --- Force passwall opkg runtime feeds to commented form (=m) AFTER defconfig.
+          # Some OpenWrt versions normalize CONFIG_FEED_* in defconfig; re-assert here.
+          # =m makes FeedSourcesAppendOPKG emit "# src/gz ..." (commented, no 404 on update).
+          # Does NOT affect compilation (packages are compiled in via CONFIG_PACKAGE_*=y).
+          python3 - <<'PYEOF'
+          p = '.config'
+          lines = open(p).read().splitlines()
+          for feed in ('passwall_packages', 'passwall_luci'):
+              key = 'CONFIG_FEED_' + feed + '='
+              found = False
+              for i, ln in enumerate(lines):
+                  if ln.startswith(key) or ln == '# ' + key.rstrip('=') + ' is not set':
+                      lines[i] = key + 'm'
+                      found = True
+              if not found:
+                  lines.append(key + 'm')
+              print('force', key + 'm', 'was_found=' + str(found))
+          open(p, 'w').write('\n'.join(lines) + '\n')
+          PYEOF
+          for feed in passwall_packages passwall_luci; do
+            grep -q "^CONFIG_FEED_${feed}=m$" .config || { echo "!! CONFIG_FEED_${feed}=m not set"; exit 1; }
+            echo "  OK  runtime source ${feed} -> commented (=m)"
+          done
+
           echo "=== required packages (must all be present) ==="
           for p in luci-app-passwall sing-box geoview chinadns-ng \
-                   mosdns luci-app-mosdns firewall4 kmod-nft-socket kmod-nft-tproxy kmod-nft-nat \
+                   frpc luci-app-frpc firewall4 kmod-nft-socket kmod-nft-tproxy kmod-nft-nat \
                    luci-theme-argon luci-app-argon-config kmod-tcp-bbr \
                    luci-app-autoreboot luci-app-vlmcsd vlmcsd; do
             grep -q "CONFIG_PACKAGE_${p}=y" .config || { echo "!! required package missing: $p"; grep -E "CONFIG_PACKAGE_${p}" .config || true; exit 1; }
             echo "  OK  $p"
           done
+
+          echo "=== unwanted: frpc zh-cn language pack (old/incomplete translation) ==="
+          if grep -qE '^CONFIG_PACKAGE_luci-i18n-frpc-zh-cn=y$' .config; then
+            echo "!! frpc zh-cn language pack sneaked in (global zh_Hans auto-pull)"; exit 1
+          fi
+          echo "  OK  no frpc zh-cn language pack"
 
           echo "=== passwall core selection (must be exactly sing-box + geoview) ==="
           grep -q '^CONFIG_PACKAGE_luci-app-passwall_INCLUDE_SingBox=y$' .config || { echo "!! SingBox switch missing"; exit 1; }
@@ -178,10 +229,12 @@ jobs:
 
           echo "=== unwanted packages (must all be absent) ==="
           echo "--- diagnostic: all proxy-core related lines in .config ---"
-          grep -iE 'xray|shadowsock|hysteria|naiveproxy|smartdns|haproxy|simple-obfs|v2ray|turboacc|homeproxy|frpc' .config || true
-          if grep -qE '^CONFIG_PACKAGE_(luci-app-homeproxy|luci-app-passwall2|luci-app-filetransfer|frpc|luci-app-frpc|frps|luci-app-turboacc|xray-core|xray-plugin|v2ray-plugin|ipv6helper|firewall|smartdns|shadowsocks-rust-sslocal|shadowsocksr-libev-ssr-local|naiveproxy|hysteria|haproxy|simple-obfs-client|shadow-tls)=y' .config; then
+          grep -iE 'xray|shadowsock|hysteria|naiveproxy|smartdns|haproxy|simple-obfs|v2ray|turboacc|homeproxy|mosdns|frps' .config || true
+          # frpc/luci-app-frpc are now REQUIRED (removed from this deny-list).
+          # mosdns/luci-app-mosdns + frps added to deny-list (must not sneak back in).
+          if grep -qE '^CONFIG_PACKAGE_(luci-app-homeproxy|luci-app-passwall2|luci-app-filetransfer|mosdns|luci-app-mosdns|luci-i18n-mosdns-zh-cn|frps|luci-app-frps|luci-i18n-frpc-zh-cn|luci-app-turboacc|xray-core|xray-plugin|v2ray-plugin|ipv6helper|firewall|smartdns|shadowsocks-rust-sslocal|shadowsocksr-libev-ssr-local|naiveproxy|hysteria|haproxy|simple-obfs-client|shadow-tls)=y' .config; then
             echo "!! an unwanted package sneaked in:"
-            grep -E '^CONFIG_PACKAGE_(luci-app-homeproxy|luci-app-passwall2|luci-app-filetransfer|frpc|luci-app-frpc|frps|luci-app-turboacc|xray-core|xray-plugin|v2ray-plugin|ipv6helper|firewall|smartdns|shadowsocks-rust-sslocal|shadowsocksr-libev-ssr-local|naiveproxy|hysteria|haproxy|simple-obfs-client|shadow-tls)=y' .config
+            grep -E '^CONFIG_PACKAGE_(luci-app-homeproxy|luci-app-passwall2|luci-app-filetransfer|mosdns|luci-app-mosdns|luci-i18n-mosdns-zh-cn|frps|luci-app-frps|luci-i18n-frpc-zh-cn|luci-app-turboacc|xray-core|xray-plugin|v2ray-plugin|ipv6helper|firewall|smartdns|shadowsocks-rust-sslocal|shadowsocksr-libev-ssr-local|naiveproxy|hysteria|haproxy|simple-obfs-client|shadow-tls)=y' .config
             exit 1
           fi
           if grep -qE '^CONFIG_PACKAGE_luci-app-passwall_(Iptables_Transparent_Proxy|INCLUDE_(SmartDNS|Haproxy|Hysteria|NaiveProxy|Shadowsocks_Rust_Client|Shadowsocks_Rust_Server|ShadowsocksR_Libev_Client|ShadowsocksR_Libev_Server|Shadow_TLS|Simple_Obfs|V2ray_Geodata|V2ray_Plugin|Xray|Xray_Plugin))=y' .config; then
@@ -346,26 +399,31 @@ jobs:
       - name: Publish release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: lean-612pw-build-${{ github.run_number }}
-          name: "AX3000T LEDE 正式版(passwall版 内核6.12+大分区+sing-box/geoview/chinadns-ng+mosdns) lean-612pw-build-${{ github.run_number }}"
+          tag_name: lean-612pw-frpc-build-${{ github.run_number }}
+          name: "AX3000T LEDE 正式版(passwall版 内核6.12+大分区+sing-box/geoview/chinadns-ng+frpc0.72.0) lean-612pw-frpc-build-${{ github.run_number }}"
           body: |
             lede (coolsnowwolf/lede) master 滚动最新 + 原生大分区 xiaomi_mi-router-ax3000t。
             内核 pin 6.12；已打 NMBM 双补丁 + mac80211 backports 6.12 修复（同已验证成功版）。
 
+            基于已成功的 passwall 版，按主人 2026-11-27 要求：去 mosdns、加 frpc 0.72.0，其余不变。
             代理：passwall 26.11.23，nftables 透明代理（带 kmod-nft-socket/tproxy/nat）；
             内核只留 sing-box 1.14.4 + geoview 0.2.9 + chinadns-ng（硬依赖），
             其余内核（xray/ss/ssr/hysteria/naiveproxy/smartdns 等）全部不编。
-            DNS：mosdns 5.3.4 + luci-app-mosdns。
+            DNS：不装 mosdns，由 passwall 的 chinadns-ng 自己管（dnsmasq → chinadns-ng）。
+            内网穿透：frpc 0.72.0（Lean feed 默认 0.70.1，已 bump）+ luci-app-frpc；
+            **不装 frpc 中文语言包**（老版本翻译不全，主人明确不要），界面为英文。
             其它插件：Argon 主题 + BBR(开机自启) + autoreboot + vlmcsd。
-            不编：homeproxy / filetransfer / frpc / turboacc / xray / ipv6helper；已摘 video 坏源。
+            不编：homeproxy / filetransfer / mosdns / turboacc / xray / ipv6helper。
+            软件源：编译源头已摘除 3 条 404 坏源（video + passwall_luci + passwall_packages，
+            后者两条用 CONFIG_FEED_*=m 生成注释行），出厂 opkg update 全绿。
 
             刷机后验收命令：
               uname -r                                  → 6.12.x
               df -h /overlay                            → 看剩余空间
               sysctl net.ipv4.tcp_congestion_control    → bbr
               ps w | grep sing-box                      → passwall 未在 LuCI 启用前无进程属正常
-            DNS 配置提醒：dnsmasq / chinadns-ng / mosdns 三者共存，刷机后需自行配好转发链
-            （建议 mosdns 只做广告过滤或特定域名分流，全量分流交给 passwall 的 chinadns-ng），配错会全网变慢。
+              opkg update                               → 全部 Updated、无 404
+            DNS 配置提醒：不装 mosdns，转发链只有 dnsmasq → chinadns-ng，比三件套版简单。
           files: out/*
           make_latest: false
           fail_on_unmatched_files: true
