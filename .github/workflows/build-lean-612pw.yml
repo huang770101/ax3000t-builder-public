@@ -131,16 +131,25 @@ jobs:
           ./scripts/feeds update -a
           ./scripts/feeds install -a
 
-          # CRITICAL: passwall marks many proxy cores "default y if aarch64"
-          # (Xray / ShadowsocksR / SimpleObfs / V2rayPlugin / Haproxy / SmartDNS...).
-          # make defconfig then turns them on even with "is not set" in the seed config.
-          # Force ALL passwall optional cores to default n; we opt in ONLY SingBox +
-          # Geoview + Nftables proxy explicitly in ax3000t-lean-612pw.config.
+          # CRITICAL: BOTH feeds mark proxy cores "default y if aarch64".
+          # passwall: Xray / SSR / SimpleObfs / V2rayPlugin / Haproxy / SmartDNS...
+          # helloworld ssr-plus: INCLUDE_Xray -> select xray-core + v2ray-geoip/geosite.
+          # make defconfig turns them on even with "is not set" in the seed config.
+          # Force ALL optional cores in BOTH feeds to default n; we opt in ONLY
+          # SingBox + Geoview + Nftables proxy + mosdns explicitly in the config.
           PW_MK="feeds/passwall_luci/luci-app-passwall/Makefile"
           test -f "$PW_MK" || { echo "!! passwall Makefile missing at $PW_MK"; find feeds -path '*luci-app-passwall/Makefile' 2>/dev/null; exit 1; }
           sed -i -E 's/^([[:space:]]*)default y([[:space:]]+if .*)?$/\1default n/' "$PW_MK"
           echo "=== passwall optional core defaults (all should be default n) ==="
           grep -nE '^[[:space:]]*(config PACKAGE_|default [yn])' "$PW_MK" | head -60
+          # helloworld feed: neutralize EVERY "default y" in all its Makefiles,
+          # otherwise ssr-plus re-selects xray-core (主人明确不要的内核).
+          HW_MK=$(find feeds -type f -path '*helloworld*' -name Makefile 2>/dev/null)
+          test -n "$HW_MK" || { echo "!! helloworld Makefiles not found"; exit 1; }
+          for mk in $HW_MK; do sed -i -E 's/^([[:space:]]*)default y([[:space:]]+if .*)?$/\1default n/' "$mk"; done
+          echo "=== helloworld ssr-plus defaults (all should be default n) ==="
+          SSRP=$(find feeds -type f -path '*helloworld*luci-app-ssr-plus/Makefile' 2>/dev/null | head -1)
+          grep -nE '^[[:space:]]*(config PACKAGE_|default [yn])' "$SSRP" 2>/dev/null | head -60
 
       - name: "Load config (passwall version) + strict gate"
         working-directory: openwrt
