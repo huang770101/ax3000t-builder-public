@@ -117,21 +117,26 @@ jobs:
           grep -q 'mediatek,bmt-mtd-overridden-oobsize = <64>' target/linux/mediatek/dts/mt7981b-xiaomi_mi-router.dtsi || { echo "!! PATCH2 missing"; exit 1; }
           echo "OK both NMBM fixes present"
 
-      - name: "Init feeds (add passwall x2, keep helloworld for mosdns, drop video)"
+      - name: "Init feeds (add passwall x2, DROP helloworld+video)"
         working-directory: openwrt
         run: |
           # passwall official feeds (author README: main + core packages)
           sed -i '1i src-git passwall_packages https://github.com/Openwrt-Passwall/openwrt-passwall-packages.git;main' feeds.conf.default
           sed -i '2i src-git passwall_luci https://github.com/Openwrt-Passwall/openwrt-passwall.git;main' feeds.conf.default
-          # helloworld kept active: mosdns 5.3.4 lives there; xray etc. stay unselected in config
+          # helloworld DROPPED entirely: it was only assumed to be mosdns's source,
+          # but mosdns actually installs from lede's own "packages" feed, and
+          # chinadns-ng/geoview/sing-box come from passwall_packages. helloworld
+          # contributes NOTHING we need and its ssr-plus choice-block force-selects
+          # xray-core (主人明确不要). Removing the feed kills the pollution at root.
           # video feed = the 7th software source (openwrt_video) that 404s on update -> drop
+          sed -i '/src-git helloworld/s/^/#/' feeds.conf.default
           sed -i '/src-git video/s/^/#/' feeds.conf.default
           echo "=== active feeds ==="
           grep '^src-git' feeds.conf.default
           ./scripts/feeds update -a
           ./scripts/feeds install -a
 
-          # CRITICAL: passwall marks many proxy cores "default y if aarch64"
+          # passwall marks many proxy cores "default y if aarch64"
           # (Xray / SSR / SimpleObfs / V2rayPlugin / Haproxy / SmartDNS...).
           # make defconfig turns them on even with "is not set" in the seed config.
           # Force ALL passwall optional cores to default n; we opt in ONLY
@@ -142,23 +147,12 @@ jobs:
           echo "=== passwall optional core defaults (all should be default n) ==="
           grep -nE '^[[:space:]]*(config PACKAGE_|default [yn])' "$PW_MK" | head -60
 
-          # helloworld feed is enabled ONLY to fetch mosdns (standalone package).
-          # Its luci-app-ssr-plus uses a Kconfig "choice" whose default is
-          # "default PACKAGE_..._INCLUDE_Xray if aarch64" (NOT "default y"), so sed
-          # cannot neutralize it -> defconfig force-selects xray-core + v2ray-geoip/geosite.
-          # Root fix: remove the unwanted package symlinks entirely so their Kconfig
-          # is never loaded. mosdns / luci-app-mosdns are independent and stay.
-          echo "=== removing unwanted helloworld symlinks (ssr-plus / xray / v2ray) ==="
-          for pkg in luci-app-ssr-plus xray-core xray-plugin v2ray-core v2ray-plugin v2raya; do
-            link="package/feeds/helloworld/$pkg"
-            if [ -e "$link" ] || [ -L "$link" ]; then
-              rm -rf "$link" && echo "  removed $link"
-            fi
+          # sanity: needed packages must be available from the kept feeds
+          for p in mosdns chinadns-ng geoview sing-box; do
+            test -f "package/feeds/packages/$p/Makefile" || test -f "package/feeds/passwall_packages/$p/Makefile" || {
+              echo "!! $p package missing from enabled feeds"; exit 1; }
+            echo "  OK $p available"
           done
-          echo "=== remaining helloworld packages ==="
-          ls package/feeds/helloworld/ 2>/dev/null || echo "(none)"
-          # sanity: mosdns must survive
-          test -e package/feeds/helloworld/mosdns && echo "  OK mosdns present" || { echo "!! mosdns symlink missing"; exit 1; }
 
       - name: "Load config (passwall version) + strict gate"
         working-directory: openwrt
