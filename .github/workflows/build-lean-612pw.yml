@@ -182,6 +182,18 @@ jobs:
           make defconfig
           grep -q "DEVICE_${DEVICE}=y" .config || { echo "!! device not selected"; exit 1; }
 
+          # --- Drop frpc zh-cn language pack AFTER defconfig.
+          # Global CONFIG_LUCI_LANG_zh_Hans=y auto-selects ALL luci-i18n-*-zh-cn at
+          # defconfig time, overriding the seed config's "is not set" for frpc.
+          # Remove ONLY frpc's pack (stale/incomplete translation); keep passwall/argon
+          # zh-cn. No second defconfig below, so it stays off through compile.
+          if grep -q '^CONFIG_PACKAGE_luci-i18n-frpc-zh-cn=y$' .config; then
+            sed -i 's/^CONFIG_PACKAGE_luci-i18n-frpc-zh-cn=y$/# CONFIG_PACKAGE_luci-i18n-frpc-zh-cn is not set/' .config
+            echo "  removed frpc zh-cn (auto-selected by global zh_Hans)"
+          fi
+          grep -q '^CONFIG_PACKAGE_luci-i18n-frpc-zh-cn=y$' .config && { echo "!! frpc zh-cn still on"; exit 1; }
+          echo "  OK  frpc zh-cn forced off"
+
           # --- Force passwall opkg runtime feeds to commented form (=m) AFTER defconfig.
           # Some OpenWrt versions normalize CONFIG_FEED_* in defconfig; re-assert here.
           # =m makes FeedSourcesAppendOPKG emit "# src/gz ..." (commented, no 404 on update).
