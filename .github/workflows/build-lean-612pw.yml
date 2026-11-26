@@ -272,27 +272,22 @@ jobs:
       - name: "Fix mac80211 backports for kernel 6.12 (sk_requests_wifi_status redefinition)"
         working-directory: openwrt
         run: |
-          mkdir -p package/kernel/mac80211/patches/subsys
+          # 不再写独立 patch 文件：编译失败后 make 重试会对同一份源码二次应用补丁，
+          # Hunk 找不到原文的 <6,16,0>，报 "Hunk #1 FAILED at 23" 直接挂掉。
+          # 改为在 Build/Prepare 末尾注入 sed：每次重新解压后都执行，且重复执行无副作用。
           python3 - <<'PYEOF'
-          lines = [
-              '--- a/backport-include/net/sock.h',
-              '+++ b/backport-include/net/sock.h',
-              '@@ -23,7 +23,7 @@',
-              ' #define sk_error_report(sk) LINUX_BACKPORT(sk_error_report(sk))',
-              ' #endif /* <= 5.14 */',
-              ' ',
-              '-#if LINUX_VERSION_IS_LESS(6,16,0)',
-              '+#if LINUX_VERSION_IS_LESS(6,12,0)',
-              ' static inline bool',
-              ' sk_requests_wifi_status(struct sock *sk)',
-              ' {',
-          ]
-          p = 'package/kernel/mac80211/patches/subsys/999-fix-sock-wifi-status-for-612.patch'
-          open(p, 'w').write('\n'.join(lines) + '\n')
-          print('wrote', p)
+          p = 'package/kernel/mac80211/Makefile'
+          s = open(p).read()
+          anchor = "\techo 'compat-wireless-$(PKG_VERSION)-$(PKG_RELEASE)-$(REVISION)' > $(PKG_BUILD_DIR)/compat_version"
+          assert s.count(anchor) == 1, '!! Build/Prepare anchor count=%d - upstream changed' % s.count(anchor)
+          sedline = ("\tsed -i 's/LINUX_VERSION_IS_LESS(6,16,0)/LINUX_VERSION_IS_LESS(6,12,0)/' "
+                     "$(PKG_BUILD_DIR)/backport-include/net/sock.h\n")
+          open(p, 'w').write(s.replace(anchor, sedline + anchor, 1))
+          print('injected idempotent sed into mac80211 Build/Prepare')
           PYEOF
-          cat -A package/kernel/mac80211/patches/subsys/999-fix-sock-wifi-status-for-612.patch
-          test "$(find package/kernel/mac80211/patches -name '*wifi-status-for-612*' | wc -l)" -eq 1
+          sed -n '375,383p' package/kernel/mac80211/Makefile
+          test "$(grep -c 'LINUX_VERSION_IS_LESS(6,12,0)' package/kernel/mac80211/Makefile)" -eq 1
+          test "$(find package/kernel/mac80211/patches -name '*wifi-status-for-612*' | wc -l)" -eq 0
 
       - name: Compile
         working-directory: openwrt
