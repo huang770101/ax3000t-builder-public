@@ -326,7 +326,6 @@ jobs:
               df -h /overlay                            → 看剩余空间
               sysctl net.ipv4.tcp_congestion_control    → bbr
               ps w | grep sing-box                      → homeproxy 未在 LuCI 启用前无进程属正常
-            注意：本版无 frpc，云端 1021 隧道将断，验收需本地进行。
           files: out/*
           make_latest: false
           fail_on_unmatched_files: true
