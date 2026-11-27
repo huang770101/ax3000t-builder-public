@@ -5,6 +5,8 @@ name: Build LEDE AX3000T (kernel 6.12 / big-partition / passwall + ttyd / BBR fi
 #   - frpc/vlmcsd 不编（显式 not set + 闸门拦截，防 zh_Hans/依赖拉回）。
 #   - ttyd: 官方包 luci-app-ttyd（依赖 ttyd 自动带入）。
 #   - LAN 默认地址: uci-defaults 内置 192.168.31.1（首启生效，刷机即 31.1）。
+#   - 自带软件源: dllkids (dl.openwrt.ai kiddin9, aarch64_cortex-a53) 追加到
+#     /etc/opkg/customfeeds.conf（首启生效，追加不覆盖）。
 #   - BBR 根治: 旧 uci-defaults 只在首启跑且不先 modprobe -> tcp_congestion_control=bbr
 #     写入时内核还没 bbr 算法，回落 cubic。改为 procd init 脚本 START=98，
 #     开机先 modprobe tcp_bbr 再 sysctl 设 bbr；刷机即自带，每次开机生效。
@@ -285,6 +287,18 @@ jobs:
           EOF
           chmod +x files/etc/uci-defaults/99-lan-ip
 
+          # --- Baked-in custom opkg feed: dllkids (kiddin9, 主人 2026-11-27 要求).
+          # Appended to /etc/opkg/customfeeds.conf on first boot (append, not
+          # overwrite, so upstream default content stays intact). Arch matches
+          # this device (aarch64_cortex-a53).
+          cat > files/etc/uci-defaults/99-custom-feeds <<'EOF'
+          #!/bin/sh
+          grep -q 'dl.openwrt.ai/packages-25.12' /etc/opkg/customfeeds.conf 2>/dev/null || \
+            echo 'src/gz dllkids https://dl.openwrt.ai/packages-25.12/aarch64_cortex-a53/kiddin9/' >> /etc/opkg/customfeeds.conf
+          exit 0
+          EOF
+          chmod +x files/etc/uci-defaults/99-custom-feeds
+
           echo "=== bbr-enable init script ==="
           cat files/etc/init.d/bbr-enable
           echo "=== rc.d symlink ==="
@@ -293,6 +307,8 @@ jobs:
           cat files/etc/uci-defaults/99-enable-bbr
           echo "=== lan-ip uci-defaults ==="
           cat files/etc/uci-defaults/99-lan-ip
+          echo "=== custom-feeds uci-defaults ==="
+          cat files/etc/uci-defaults/99-custom-feeds
 
       - name: Restore downloads cache
         uses: actions/cache/restore@v4
@@ -441,6 +457,7 @@ jobs:
             网页终端：luci-app-ttyd（官方包，网页版命令行）。
             其它插件：Argon 主题 + BBR + autoreboot。
             LAN 默认地址：192.168.31.1（编译内置 uci-defaults，刷机后 LuCI 访问 http://192.168.31.1）。
+            自带软件源：customfeeds.conf 追加 dllkids（dl.openwrt.ai/packages-25.12，kiddin9，架构 aarch64_cortex-a53）。
             不编：homeproxy / filetransfer / mosdns / frpc / vlmcsd / turboacc / xray / ipv6helper。
             软件源：编译源头已摘除 3 条 404 坏源（video + passwall_luci + passwall_packages，
             后者两条用 CONFIG_FEED_*=m 生成注释行），出厂 opkg update 全绿。
