@@ -1,19 +1,14 @@
-name: Build LEDE AX3000T (kernel 6.12 / big-partition / passwall + 6插件 / 自建第三方opkg源)
+name: Build LEDE AX3000T (kernel 6.12 / big-partition / passwall + 6插件)
 
 # 基于 build-lean-612pw.yml（已编译成功的 passwall 版 + frpc 版）。
 # 本次按主人 2026-11-27 三修订：
 #   ① oaf/应用过滤 不编进固件（主人明确）。
 #   ② 编进固件 6 件：luci-app-ddnsto(官方linkease feed) / luci-app-ddns+ddns-scripts /
 #      luci-app-upnp(+miniupnpd-nftables) / luci-app-arpbind / luci-app-eqos / luci-app-mwan3+mwan3。
-#   ③ 自建第三方 opkg 软件源：两批 ~60 个第三方插件项目全部以 =m 编译（失败包 IGNORE_ERRORS
-#      跳过），生成 Packages 索引后强制推到本仓库 orphan 分支 feed，固件 customfeeds.conf
-#      出厂即带该源 URL，opkg 随装随用。补 mihomo 插件(MinimaxFlora) + frp 插件(lede feed =m)。
-#   ④ helloworld/qmodem 仅在第二阶段启用（=m 编进源、不装固件；deny-list 闸门保固件纯净）。
-#   - frpc =m（只进第三方源，不装固件）；vlmcsd 不编。
 #   - ttyd / BBR procd init / LAN 31.1 / dllkids 源 —— 全部沿用 build-12。
 # 内核只留 sing-box / geoview / chinadns-ng；feed 加 passwall_packages + passwall_luci。
 # 摘源：video（404 坏源）注释；passwall 两条源 =m 生成注释行，出厂 opkg update 全绿。
-# tag = lean-612pw-3rdfeed-build-N。
+# tag = lean-612pw-build-N。
 
 on:
   workflow_dispatch:
@@ -264,10 +259,9 @@ jobs:
           # miniupnpd 的 iptables 变体绝不允许进固件（拉旧 iptables 栈，跟 fw4 打架）
           grep -q '^CONFIG_PACKAGE_miniupnpd-iptables=y$' .config && { echo "!! miniupnpd-iptables sneaked in (want nftables variant)"; exit 1; }
           echo "  OK  miniupnpd nftables variant only"
-          # frpc 只许 =m（进第三方源），不许 =y（装进固件）
-          grep -q '^CONFIG_PACKAGE_frpc=m$' .config || { echo "!! frpc must be =m"; grep -E '^CONFIG_PACKAGE_frpc' .config; exit 1; }
-          grep -q '^CONFIG_PACKAGE_frpc=y$' .config && { echo "!! frpc =y sneaked in"; exit 1; }
-          echo "  OK  frpc =m (feed only)"
+          # frpc 彻底不编（2026-11-27 主人拍板：第三方源项目终止）
+          grep -qE '^CONFIG_PACKAGE_(frpc|luci-app-frpc)=y' .config && { echo "!! frpc sneaked in"; exit 1; }
+          echo "  OK  frpc absent"
 
           echo "=== passwall core selection (must be exactly sing-box + geoview) ==="
           grep -q '^CONFIG_PACKAGE_luci-app-passwall_INCLUDE_SingBox=y$' .config || { echo "!! SingBox switch missing"; exit 1; }
@@ -280,9 +274,9 @@ jobs:
           grep -iE 'xray|shadowsock|hysteria|naiveproxy|smartdns|haproxy|simple-obfs|v2ray|turboacc|homeproxy|mosdns|frp|vlmcsd' .config || true
           # 2026-11-27 三修订: deny-list 追加 oaf/openclash/mihomo/clash/vssr 等
           # 第三方插件（=m 只进软件源，绝不装固件）。frpc 允许 =m。
-          if grep -qE '^CONFIG_PACKAGE_(luci-app-homeproxy|luci-app-passwall2|luci-app-filetransfer|mosdns|luci-app-mosdns|luci-i18n-mosdns-zh-cn|luci-i18n-frpc-zh-cn|frps|luci-app-frps|luci-app-vlmcsd|vlmcsd|luci-app-turboacc|xray-core|xray-plugin|v2ray-plugin|ipv6helper|firewall|smartdns|shadowsocks-rust-sslocal|shadowsocksr-libev-ssr-local|naiveproxy|hysteria|haproxy|simple-obfs-client|shadow-tls|luci-app-oaf|kmod-oaf|appfilter|luci-app-openclash|luci-app-mihomo|luci-app-clash|luci-app-vssr|luci-app-ssr-plus|luci-app-alist|luci-app-adguardhome|luci-app-serverchan|luci-app-ddns-go|luci-app-istore|luci-app-easytier|luci-app-dae|luci-app-daed)=y' .config; then
+          if grep -qE '^CONFIG_PACKAGE_(luci-app-homeproxy|luci-app-passwall2|luci-app-filetransfer|mosdns|luci-app-mosdns|luci-i18n-mosdns-zh-cn|frpc|luci-app-frpc|luci-i18n-frpc-zh-cn|frps|luci-app-frps|luci-app-vlmcsd|vlmcsd|luci-app-turboacc|xray-core|xray-plugin|v2ray-plugin|ipv6helper|firewall|smartdns|shadowsocks-rust-sslocal|shadowsocksr-libev-ssr-local|naiveproxy|hysteria|haproxy|simple-obfs-client|shadow-tls|luci-app-oaf|kmod-oaf|appfilter|luci-app-openclash|luci-app-mihomo|luci-app-clash|luci-app-vssr|luci-app-ssr-plus|luci-app-alist|luci-app-adguardhome|luci-app-serverchan|luci-app-ddns-go|luci-app-istore|luci-app-easytier|luci-app-dae|luci-app-daed)=y' .config; then
             echo "!! an unwanted package sneaked in:"
-            grep -E '^CONFIG_PACKAGE_(luci-app-homeproxy|luci-app-passwall2|luci-app-filetransfer|mosdns|luci-app-mosdns|luci-i18n-mosdns-zh-cn|luci-i18n-frpc-zh-cn|frps|luci-app-frps|luci-app-vlmcsd|vlmcsd|luci-app-turboacc|xray-core|xray-plugin|v2ray-plugin|ipv6helper|firewall|smartdns|shadowsocks-rust-sslocal|shadowsocksr-libev-ssr-local|naiveproxy|hysteria|haproxy|simple-obfs-client|shadow-tls|luci-app-oaf|kmod-oaf|appfilter|luci-app-openclash|luci-app-mihomo|luci-app-clash|luci-app-vssr|luci-app-ssr-plus|luci-app-alist|luci-app-adguardhome|luci-app-serverchan|luci-app-ddns-go|luci-app-istore|luci-app-easytier|luci-app-dae|luci-app-daed)=y' .config
+            grep -E '^CONFIG_PACKAGE_(luci-app-homeproxy|luci-app-passwall2|luci-app-filetransfer|mosdns|luci-app-mosdns|luci-i18n-mosdns-zh-cn|frpc|luci-app-frpc|luci-i18n-frpc-zh-cn|frps|luci-app-frps|luci-app-vlmcsd|vlmcsd|luci-app-turboacc|xray-core|xray-plugin|v2ray-plugin|ipv6helper|firewall|smartdns|shadowsocks-rust-sslocal|shadowsocksr-libev-ssr-local|naiveproxy|hysteria|haproxy|simple-obfs-client|shadow-tls|luci-app-oaf|kmod-oaf|appfilter|luci-app-openclash|luci-app-mihomo|luci-app-clash|luci-app-vssr|luci-app-ssr-plus|luci-app-alist|luci-app-adguardhome|luci-app-serverchan|luci-app-ddns-go|luci-app-istore|luci-app-easytier|luci-app-dae|luci-app-daed)=y' .config
             exit 1
           fi
           if grep -qE '^CONFIG_PACKAGE_luci-app-passwall_(Iptables_Transparent_Proxy|INCLUDE_(SmartDNS|Haproxy|Hysteria|NaiveProxy|Shadowsocks_Rust_Client|Shadowsocks_Rust_Server|ShadowsocksR_Libev_Client|ShadowsocksR_Libev_Server|Shadow_TLS|Simple_Obfs|V2ray_Geodata|V2ray_Plugin|Xray|Xray_Plugin))=y' .config; then
@@ -359,9 +353,6 @@ jobs:
           #!/bin/sh
           grep -q 'dl.openwrt.ai/packages-25.12' /etc/opkg/customfeeds.conf 2>/dev/null || \
             echo 'src/gz dllkids https://dl.openwrt.ai/packages-25.12/aarch64_cortex-a53/kiddin9/' >> /etc/opkg/customfeeds.conf
-          # 自建第三方插件源（本 workflow 编译上传的 orphan 分支 feed）
-          grep -q 'ax3000t-builder-public/feed' /etc/opkg/customfeeds.conf 2>/dev/null || \
-            echo 'src/gz myfeed https://raw.githubusercontent.com/huang770101/ax3000t-builder-public/feed/' >> /etc/opkg/customfeeds.conf
           exit 0
           EOF
           chmod +x files/etc/uci-defaults/99-custom-feeds
@@ -475,213 +466,6 @@ jobs:
             openwrt/toolchain
           key: lean612pw-toolchain-${{ github.run_id }}
 
-      - name: "Build third-party opkg feed (all extra plugins as =m, ignore per-pkg errors)"
-        working-directory: openwrt
-        run: |
-          # 主人 2026-11-27 三修订：两批第三方插件项目全部编成自有 opkg 软件源。
-          # 固件已在上一阶段完整生成；本阶段只追加编译 =m 包（不装进固件）。
-          # helloworld / qmodem 是 lede feeds.conf.default 自带注释行，这里放开（=m）。
-          sed -i '/src-git helloworld/s/^#//' feeds.conf.default
-          sed -i '/src-git qmodem/s/^#//' feeds.conf.default
-          cat >> feeds.conf.default <<'FEEDS'
-          src-git third_ddnsto https://github.com/linkease/ddnsto-openwrt.git;main
-          src-git third_mihomo https://github.com/MinimaxFlora/luci-app-mihomo.git;master
-          src-git third_oaf https://github.com/destan19/OpenAppFilter.git
-          src-git third_openclash https://github.com/vernesong/OpenClash.git
-          src-git third_serverchan https://github.com/tty228/luci-app-serverchan.git
-          src-git third_alist https://github.com/sbwml/luci-app-alist.git
-          src-git third_mosdns https://github.com/sbwml/luci-app-mosdns.git
-          src-git third_adguardhome https://github.com/rufengsuixing/luci-app-adguardhome.git
-          src-git third_dae https://github.com/QiuSimons/luci-app-dae.git
-          src-git third_daed https://github.com/QiuSimons/luci-app-daed.git
-          src-git third_vmlinuxbtf https://github.com/QiuSimons/vmlinux-btf.git
-          src-git third_iptvhelper https://github.com/riverscn/openwrt-iptvhelper.git
-          src-git third_rosy https://github.com/rosywrt/luci-theme-rosy.git
-          src-git third_homebox https://github.com/selfcan/luci-app-homebox.git
-          src-git third_onliner https://github.com/selfcan/luci-app-onliner.git
-          src-git third_advanced https://github.com/sirpdboy/luci-app-advanced.git
-          src-git third_chatgpt https://github.com/sirpdboy/luci-app-chatgpt-web.git
-          src-git third_cupsd https://github.com/sirpdboy/luci-app-cupsd.git
-          src-git third_ddnsgo https://github.com/sirpdboy/luci-app-ddns-go.git
-          src-git third_eqosplus https://github.com/sirpdboy/luci-app-eqosplus.git
-          src-git third_partexp https://github.com/sirpdboy/luci-app-partexp.git
-          src-git third_opentopd https://github.com/sirpdboy/luci-theme-opentopd.git
-          src-git third_netspeedtest https://github.com/sirpdboy/netspeedtest.git
-          src-git third_tencddns https://github.com/Tencent-Cloud-Plugins/tencentcloud-openwrt-plugin-ddns.git
-          src-git third_neobird https://github.com/thinktip/luci-theme-neobird.git
-          src-git third_infinity https://github.com/xiaoqingfengATGH/luci-theme-infinityfreedom.git
-          src-git third_ua2f https://github.com/Zxilly/UA2F.git
-          src-git third_ua2fluci https://github.com/lucikap/luci-app-ua2f.git
-          src-git third_design https://github.com/0x676e67/luci-theme-design.git
-          src-git third_designcfg https://github.com/0x676e67/luci-app-design-config.git
-          src-git third_bandwidthd https://github.com/AlexZhuo/luci-app-bandwidthd.git
-          src-git third_mentohust https://github.com/BoringCat/luci-app-mentohust.git
-          src-git third_minieap https://github.com/BoringCat/luci-app-minieap.git
-          src-git third_minieapcore https://github.com/BoringCat/minieap-openwrt.git
-          src-git third_rkpipid https://github.com/CHN-beta/rkp-ipid.git
-          src-git third_easytier https://github.com/EasyTier/luci-app-easytier.git
-          src-git third_poweroff https://github.com/esirplayground/luci-app-poweroff.git
-          src-git third_luclash https://github.com/frainzy1477/luci-app-clash.git
-          src-git third_edge https://github.com/garypang13/luci-theme-edge.git
-          src-git third_npc https://github.com/ghosthgytop/luci-app-npc.git
-          src-git third_msdlite https://github.com/hejiadong0608/luci-app-msd_lite.git
-          src-git third_aliddns https://github.com/honwen/luci-app-aliddns.git
-          src-git third_ikoolproxy https://github.com/iwrt/luci-app-ikoolproxy.git
-          src-git third_aliyundrive https://github.com/jerrykuku/go-aliyundrive-webdav.git
-          src-git third_maxminddb https://github.com/jerrykuku/lua-maxminddb.git
-          src-git third_aliyundluci https://github.com/jerrykuku/luci-app-go-aliyundrive-webdav.git
-          src-git third_dnsfilter https://github.com/kiddin9/luci-app-dnsfilter.git
-          src-git third_istore https://github.com/linkease/istore.git
-          src-git third_gecoosac https://github.com/lwb1978/openwrt-gecoosac.git
-          src-git third_dogcomluci https://github.com/mchome/luci-app-dogcom.git
-          src-git third_dogcom https://github.com/mchome/openwrt-dogcom.git
-          src-git third_leigod https://github.com/miaoermua/luci-app-leigod-acc.git
-          src-git third_vssr https://github.com/MilesPoupart/luci-app-vssr.git
-          src-git third_bear https://github.com/NateLol/luci-app-bearDropper.git
-          src-git third_athena https://github.com/NONGFAH/luci-app-athena-led.git
-          src-git third_atmaterial https://github.com/openwrt-develop/luci-theme-atmaterial.git
-          src-git third_macvlan https://github.com/ParticleG/luci-app-macvlan.git
-          FEEDS
-          # Update/install ONLY the feeds added in this phase (helloworld/qmodem/third_*).
-          # `update -a` would hit the locally-patched feeds (luci eqos, ddnsto 4.2.9)
-          # and git pull --rebase dies on a dirty tree. Base feeds already installed.
-          # 2026-11-27 Run#15 修复：原写法 '^(third_|...)$' 中 third_ 后被 $ 锚死，
-          # third_xxx 整行不匹配 → 56 个第三方 feed 全没 update/install。
-          PB_FEEDS=$(grep -oE '^src-git [a-zA-Z0-9_]+' feeds.conf.default | awk '{print $2}' | grep -E '^(third_[A-Za-z0-9_]+|helloworld|qmodem)$')
-          echo "phase-B feeds: $PB_FEEDS" | tr '\n' ' '; echo
-          echo "phase-B feed count: $(echo $PB_FEEDS | wc -w)"
-          ./scripts/feeds update $PB_FEEDS
-          ./scripts/feeds install $PB_FEEDS
-          # 把两批第三方源全部标记 =m + mihomo/frpc 插件显式 =m
-          python3 - <<'PYEOF'
-          feeds = ['helloworld', 'qmodem'] + \
-                  [l.split()[1] for l in open('feeds.conf.default').read().splitlines() if l.startswith('src-git third_')]
-          lines = open('.config').read().splitlines()
-          for f in feeds:
-              key = 'CONFIG_FEED_' + f + '=m'
-              hit = False
-              for i, ln in enumerate(lines):
-                  if ln.startswith('CONFIG_FEED_' + f + '=') or ln == '# CONFIG_FEED_' + f + ' is not set':
-                      lines[i] = key; hit = True
-              if not hit:
-                  lines.append(key)
-          # 清掉第三方 feed 包的显式 not-set 行（否则 defconfig 不会把它们标成 m 编进源）
-          import os
-          tpkgs = set()
-          for d in os.listdir('package/feeds'):
-              if not d.startswith('third_'):
-                  continue
-              for sub in os.listdir('package/feeds/' + d):
-                  mk = 'package/feeds/%s/%s/Makefile' % (d, sub)
-                  if os.path.isfile(mk):
-                      for ln in open(mk, errors='ignore'):
-                          if ln.startswith('PKG_NAME:='):
-                              tpkgs.add(ln.split(':=')[1].strip())
-          lines = [ln for ln in lines if not (
-              ln.startswith('# CONFIG_PACKAGE_') and ln.endswith(' is not set') and
-              ln[17:-11] in tpkgs)]
-          for pkg in ('luci-app-mihomo', 'mihomo'):
-              key = 'CONFIG_PACKAGE_' + pkg + '=m'
-              if not any(ln.startswith('CONFIG_PACKAGE_' + pkg + '=') for ln in lines):
-                  lines.append(key)
-          open('.config', 'w').write('\n'.join(lines) + '\n')
-          print('marked %d feeds as =m; cleared %d third-party not-set lines' % (len(feeds), len(tpkgs)))
-          PYEOF
-          make defconfig
-          # IGNORE_ERRORS=m: 第三方 =m 包编译失败不致命（固件已完成，源里少哪个包不影响其他）
-          make -k -j$(nproc) IGNORE_ERRORS=m || true
-          echo "=== ipk inventory ==="
-          find bin/packages bin/targets -name '*.ipk' 2>/dev/null | wc -l
-
-      - name: "Publish third-party feed (force-push orphan branch 'feed')"
-        working-directory: openwrt
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          rm -rf /tmp/feedpub && mkdir -p /tmp/feedpub
-          find bin/packages bin/targets -name '*.ipk' -size -90M -exec cp {} /tmp/feedpub/ \; 2>/dev/null || true
-          echo "=== published ipks: $(ls /tmp/feedpub | wc -l) (files >90M excluded to satisfy GitHub 100MB limit) ==="
-          cd /tmp/feedpub
-          python3 - <<'PYEOF'
-          import tarfile, io, gzip, hashlib, os, re, subprocess
-          # 2026-11-27 Run#15 修复：lede master 的 ipk 已改为 tar.gz 新格式
-          # （1f8b 头，成员 ./debian-binary ./control.tar.gz ./data.tar.gz），
-          # 老解析器只认 ar(!<arch>) → 288 个 ipk 全跳过、Packages 索引 0 字节。
-          # 现在两种格式都解析：ar 老格式 + tar.gz 新格式（内层 gzip/zstd）。
-          ZSTD_MAGIC = b'\x28\xb5\x2f\xfd'
-          def extract_control(data, fn):
-              # 新格式：tar.gz 外壳
-              if data[:2] == b'\x1f\x8b':
-                  t = tarfile.open(fileobj=io.BytesIO(data), mode='r:gz')
-                  for cand in t.getnames():
-                      if cand.strip('./') in ('control.tar.gz', 'control.tar.zst'):
-                          blob = t.extractfile(cand).read()
-                          if blob[:4] == ZSTD_MAGIC:
-                              blob = subprocess.run(['zstd', '-d'], input=blob,
-                                                    capture_output=True, check=True).stdout
-                          inner = tarfile.open(fileobj=io.BytesIO(blob), mode='r:*')
-                          mem = [m for m in inner.getmembers()
-                                 if os.path.basename(m.name) == 'control'][0]
-                          return inner.extractfile(mem).read().decode(errors='replace')
-                  return None
-              # 老格式：ar 归档
-              if data[:8] == b'!<arch>\n':
-                  pos = 8
-                  while pos < len(data):
-                      hdr = data[pos:pos+60]
-                      try:
-                          name = hdr[:16].decode().strip().rstrip('/')
-                          size = int(hdr[48:58].decode().strip())
-                      except Exception:
-                          break
-                      blob = data[pos+60:pos+60+size]
-                      pos += 60 + size
-                      if pos % 2: pos += 1
-                      if name in ('control.tar.gz', 'control.tar.zst'):
-                          if blob[:4] == ZSTD_MAGIC:
-                              blob = subprocess.run(['zstd', '-d'], input=blob,
-                                                    capture_output=True, check=True).stdout
-                          tar = tarfile.open(fileobj=io.BytesIO(blob), mode='r:*')
-                          mem = [m for m in tar.getmembers()
-                                 if os.path.basename(m.name) == 'control'][0]
-                          return tar.extractfile(mem).read().decode(errors='replace')
-                  return None
-              return None
-          entries = []
-          for fn in sorted(os.listdir('.')):
-              if not fn.endswith('.ipk'):
-                  continue
-              data = open(fn, 'rb').read()
-              try:
-                  control = extract_control(data, fn)
-              except Exception as e:
-                  print('skip', fn, str(e)[:60])
-                  control = None
-              if not control:
-                  continue
-              fields = dict(l.split(': ', 1) for l in control.splitlines() if ': ' in l)
-              pkg = fields.get('Package'); ver = fields.get('Version'); arch = fields.get('Architecture')
-              if not pkg:
-                  continue
-              dep = fields.get('Depends')
-              e = 'Package: %s\nVersion: %s\n' % (pkg, ver)
-              if dep: e += 'Depends: %s\n' % dep
-              e += 'Architecture: %s\nSize: %d\nSHA256sum: %s\nFilename: %s\n\n' % (
-                  arch, len(data), hashlib.sha256(data).hexdigest(), fn)
-              entries.append(e)
-          idx = ''.join(entries)
-          open('Packages', 'w').write(idx)
-          with gzip.open('Packages.gz', 'wb') as f:
-              f.write(idx.encode())
-          print('index entries:', len(entries))
-          PYEOF
-          git init -q
-          git config user.email "feed-bot@ax3000t.local" && git config user.name "feed-bot"
-          git add -fA .
-          git commit -qm "third-party opkg feed build-${{ github.run_number }} ($(ls *.ipk | wc -l) ipks)"
-          git push -f "https://x-access-token:${GH_TOKEN}@github.com/huang770101/ax3000t-builder-public.git" HEAD:refs/heads/feed
-          echo "feed published: https://raw.githubusercontent.com/huang770101/ax3000t-builder-public/feed/"
-
       - name: Upload build log on failure
         if: failure()
         uses: actions/upload-artifact@v4
@@ -714,39 +498,30 @@ jobs:
       - name: Publish release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: lean-612pw-3rdfeed-build-${{ github.run_number }}
-          name: "AX3000T LEDE 正式版(passwall+6插件+自建第三方源 内核6.12) lean-612pw-3rdfeed-build-${{ github.run_number }}"
+          tag_name: lean-612pw-build-${{ github.run_number }}
+          name: "AX3000T LEDE 正式版(passwall+6插件 内核6.12) lean-612pw-build-${{ github.run_number }}"
           body: |
             lede (coolsnowwolf/lede) master 滚动最新 + 原生大分区 xiaomi_mi-router-ax3000t。
             内核 pin 6.12；已打 NMBM 双补丁 + mac80211 backports 6.12 修复（同已验证成功版）。
 
-            按主人 2026-11-27 三修订：新增 6 插件编进固件 + 自建第三方 opkg 软件源。
-            编进固件新增：
+            编进固件：
               - DDNSTO 远程控制（linkease 官方 ddnsto + luci-app-ddnsto）
               - 动态 DNS（luci-app-ddns + ddns-scripts + aliyun/dnspod 服务商）
               - UPnP（miniuppd-nftables 变体，匹配 fw4；不用 iptables 变体）
               - IP/MAC 绑定（luci-app-arpbind）
               - IP 限速（luci-app-eqos）
               - 负载均衡（luci-app-mwan3）
-            自建第三方 opkg 源（出厂已配好，opkg update 后随装随用）：
-              - 源地址：https://raw.githubusercontent.com/huang770101/ax3000t-builder-public/feed/
-              - OpenClash / mihomo / alist / mosdns / adguardhome / serverchan / ddnsgo /
-                easytier / dae / daed / oaf(kmod 按本固件内核编译) / UA2F / 网速测试 /
-                sirpdboy 系列 / 多主题 等两批 ~60 个插件项目全部编译入源
-              - frp 插件（frpc+luci-app-frpc 0.70.1）、mihomo 插件也已入源
-              - 编译失败的个别老包已自动跳过，不影响源内其他包安装
             代理：passwall，内核只留 sing-box + geoview + chinadns-ng。
             其它：Argon 主题 / ttyd / autoreboot / BBR(开机自启) / LAN 默认 192.168.31.1。
-            不编进固件：oaf / homeproxy / mosdns / turboacc / xray / vlmcsd（oaf 等在第三方源里可装）。
-            自带软件源：dllkids(dl.openwrt.ai) + 自建 myfeed，opkg update 全绿。
+            不编进固件：oaf / homeproxy / mosdns / turboacc / xray / vlmcsd / frpc / ttyd。
+            自带软件源：dllkids(dl.openwrt.ai)，opkg update 全绿。
 
             刷机后验收命令：
               uname -r                                  → 6.12.x
               sysctl net.ipv4.tcp_congestion_control    → bbr
               logread | grep bbr-enable                 → applied: bbr
               uci get network.lan.ipaddr                → 192.168.31.1
-              opkg update                               → dllkids + myfeed 全部 Updated
-              opkg install luci-app-openclash           → 示例：从自建源装插件
+              opkg update                               → 全部 Updated、无 404
             注意：raw.githubusercontent.com 若直连不畅，开关一次 passwall 代理即可。
               ps w | grep sing-box                      → passwall 未在 LuCI 启用前无进程属正常
               opkg update                               → 全部 Updated、无 404
