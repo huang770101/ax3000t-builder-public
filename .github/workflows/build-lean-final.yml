@@ -1,9 +1,9 @@
-name: Build LEDE AX3000T 最终版 (kernel 6.12 / 纯净 / passwall + Argon + BBR + autoreboot)
+name: Build LEDE AX3000T 最终版 (kernel 6.12 / passwall + Argon + BBR + autoreboot + ttyd + zram)
 
 # 基于 build-lean-612pw.yml（已 5 次编译成功的验证管线）精简。
-# 主人 2026-11-27 指定「最终版」：
-#   插件只有 4 样：passwall / Argon / BBR(必须开机自启) / 定时重启。
-#   Argon 用内建壁纸（不做任何壁纸覆盖配置）。
+# 主人 2026-11-27 指定「最终版」，2026-11-28 追加固态：
+#   插件：passwall / Argon / BBR(必须开机自启) / 定时重启 / ttyd(网页终端) + zram(受控省内存)。
+#   Argon 出厂默认内建壁纸：zz-argon-wallpaper 首启把 online_wallpaper 覆盖成 none。
 #   LAN 默认 192.168.31.1；root 密码 + WiFi(ESSID Xiaomi_14D3) 编译内置，
 #     密码值走 Actions secrets（ROOT_PASSWORD / WIFI_PASSWORD），不进仓库文本。
 #   opkg 源出厂即为主人指定的固定清单：
@@ -157,11 +157,21 @@ jobs:
               echo "!! $p package missing from enabled feeds"; exit 1; }
             echo "  OK $p available"
           done
-          for p in luci-theme-argon luci-app-argon-config luci-app-autoreboot; do
+          for p in luci-theme-argon luci-app-argon-config luci-app-autoreboot luci-app-ttyd; do
             test -f "package/feeds/luci/$p/Makefile" || test -f "package/feeds/packages/$p/Makefile" || {
               echo "!! $p missing"; exit 1; }
             echo "  OK $p available"
           done
+          # ttyd 二进制在 packages feed（luci-app-ttyd 依赖它，需确认 Makefile 在）
+          test -f package/feeds/packages/ttyd/Makefile || {
+            echo "!! ttyd binary Makefile missing"; exit 1; }
+          echo "  OK ttyd binary available"
+          # zram-swap 是 base system 包，定义在 package/system/zram-swap（不在 feeds 里）
+          # kmod-zram 是内核核心包，定义在 package/kernel/linux/modules/other.mk
+          test -f package/system/zram-swap/Makefile || { echo "!! zram-swap Makefile missing"; exit 1; }
+          grep -q 'define KernelPackage/zram' package/kernel/linux/modules/other.mk || {
+            echo "!! kmod-zram definition missing"; exit 1; }
+          echo "  OK zram-swap + kmod-zram available"
           # kmod-tcp-bbr 是内核核心包，定义在 package/kernel/linux/modules/netsupport.mk
           # （无独立 Makefile 目录，不能进 feeds 可用性检查循环）
           grep -q 'tcp-bbr' package/kernel/linux/modules/netsupport.mk || {
@@ -216,11 +226,11 @@ jobs:
 
           echo "=== unwanted packages (must all be absent) ==="
           echo "--- diagnostic: proxy-core related lines in .config ---"
-          grep -iE 'xray|shadowsock|hysteria|naiveproxy|smartdns|haproxy|simple-obfs|v2ray|turboacc|homeproxy|mosdns|frp|vlmcsd|ttyd' .config || true
-          # 最终版纯净闸门：上一版插件一个都不许回来，frpc/ttyd/ddns/upnp/arpbind/eqos/mwan3 全禁。
-          if grep -qE '^CONFIG_PACKAGE_(luci-app-homeproxy|luci-app-passwall2|luci-app-filetransfer|mosdns|luci-app-mosdns|luci-i18n-mosdns-zh-cn|frps|luci-app-frps|luci-app-vlmcsd|vlmcsd|luci-app-turboacc|xray-core|xray-plugin|v2ray-plugin|ipv6helper|firewall|smartdns|shadowsocks-rust-sslocal|shadowsocksr-libev-ssr-local|naiveproxy|hysteria|haproxy|simple-obfs-client|shadow-tls|luci-app-oaf|kmod-oaf|appfilter|luci-app-openclash|luci-app-mihomo|luci-app-clash|luci-app-vssr|luci-app-ssr-plus|luci-app-alist|luci-app-adguardhome|luci-app-serverchan|luci-app-ddns-go|luci-app-istore|luci-app-easytier|luci-app-dae|luci-app-daed|luci-app-ttyd|ttyd|luci-app-frpc|luci-i18n-frpc-zh-cn|luci-app-ddnsto|ddnsto|luci-app-ddns|ddns-scripts|luci-app-upnp|miniupnpd-nftables|luci-app-arpbind|luci-app-eqos|luci-app-mwan3|mwan3|frpc)=y' .config; then
+          grep -iE 'xray|shadowsock|hysteria|naiveproxy|smartdns|haproxy|simple-obfs|v2ray|turboacc|homeproxy|mosdns|frp|vlmcsd' .config || true
+          # 最终版纯净闸门：上一版插件一个都不许回来，frpc/ddns/upnp/arpbind/eqos/mwan3 全禁；ttyd 已按主人 2026-11-28 指定放行。
+          if grep -qE '^CONFIG_PACKAGE_(luci-app-homeproxy|luci-app-passwall2|luci-app-filetransfer|mosdns|luci-app-mosdns|luci-i18n-mosdns-zh-cn|frps|luci-app-frps|luci-app-vlmcsd|vlmcsd|luci-app-turboacc|xray-core|xray-plugin|v2ray-plugin|ipv6helper|firewall|smartdns|shadowsocks-rust-sslocal|shadowsocksr-libev-ssr-local|naiveproxy|hysteria|haproxy|simple-obfs-client|shadow-tls|luci-app-oaf|kmod-oaf|appfilter|luci-app-openclash|luci-app-mihomo|luci-app-clash|luci-app-vssr|luci-app-ssr-plus|luci-app-alist|luci-app-adguardhome|luci-app-serverchan|luci-app-ddns-go|luci-app-istore|luci-app-easytier|luci-app-dae|luci-app-daed|luci-app-frpc|luci-i18n-frpc-zh-cn|luci-app-ddnsto|ddnsto|luci-app-ddns|ddns-scripts|luci-app-upnp|miniupnpd-nftables|luci-app-arpbind|luci-app-eqos|luci-app-mwan3|mwan3|frpc)=y' .config; then
             echo "!! an unwanted package sneaked in:"
-            grep -E '^CONFIG_PACKAGE_(luci-app-homeproxy|luci-app-passwall2|luci-app-filetransfer|mosdns|luci-app-mosdns|luci-i18n-mosdns-zh-cn|frps|luci-app-frps|luci-app-vlmcsd|vlmcsd|luci-app-turboacc|xray-core|xray-plugin|v2ray-plugin|ipv6helper|firewall|smartdns|shadowsocks-rust-sslocal|shadowsocksr-libev-ssr-local|naiveproxy|hysteria|haproxy|simple-obfs-client|shadow-tls|luci-app-oaf|kmod-oaf|appfilter|luci-app-openclash|luci-app-mihomo|luci-app-clash|luci-app-vssr|luci-app-ssr-plus|luci-app-alist|luci-app-adguardhome|luci-app-serverchan|luci-app-ddns-go|luci-app-istore|luci-app-easytier|luci-app-dae|luci-app-daed|luci-app-ttyd|ttyd|luci-app-frpc|luci-i18n-frpc-zh-cn|luci-app-ddnsto|ddnsto|luci-app-ddns|ddns-scripts|luci-app-upnp|miniupnpd-nftables|luci-app-arpbind|luci-app-eqos|luci-app-mwan3|mwan3|frpc)=y' .config
+            grep -E '^CONFIG_PACKAGE_(luci-app-homeproxy|luci-app-passwall2|luci-app-filetransfer|mosdns|luci-app-mosdns|luci-i18n-mosdns-zh-cn|frps|luci-app-frps|luci-app-vlmcsd|vlmcsd|luci-app-turboacc|xray-core|xray-plugin|v2ray-plugin|ipv6helper|firewall|smartdns|shadowsocks-rust-sslocal|shadowsocksr-libev-ssr-local|naiveproxy|hysteria|haproxy|simple-obfs-client|shadow-tls|luci-app-oaf|kmod-oaf|appfilter|luci-app-openclash|luci-app-mihomo|luci-app-clash|luci-app-vssr|luci-app-ssr-plus|luci-app-alist|luci-app-adguardhome|luci-app-serverchan|luci-app-ddns-go|luci-app-istore|luci-app-easytier|luci-app-dae|luci-app-daed|luci-app-frpc|luci-i18n-frpc-zh-cn|luci-app-ddnsto|ddnsto|luci-app-ddns|ddns-scripts|luci-app-upnp|miniupnpd-nftables|luci-app-arpbind|luci-app-eqos|luci-app-mwan3|mwan3|frpc)=y' .config
             exit 1
           fi
           if grep -qE '^CONFIG_PACKAGE_luci-app-passwall_(Iptables_Transparent_Proxy|INCLUDE_(SmartDNS|Haproxy|Hysteria|NaiveProxy|Shadowsocks_Rust_Client|Shadowsocks_Rust_Server|ShadowsocksR_Libev_Client|ShadowsocksR_Libev_Server|Shadow_TLS|Simple_Obfs|V2ray_Geodata|V2ray_Plugin|Xray|Xray_Plugin))=y' .config; then
@@ -307,7 +317,7 @@ jobs:
 
           # --- WiFi 编译内置（主人 2026-11-27 指定）：ESSID Xiaomi_14D3，双频同名，WPA2。
           # config_generate 先生成 radio0/radio1（默认 disabled=1），uci-defaults 在其后执行，
-          # 这里放开 disabled 并统一 SSID/密钥；Argon 主题用内建壁纸，不做任何壁纸覆盖。
+          # 这里放开 disabled 并统一 SSID/密钥；壁纸由 zz-argon-wallpaper 单独处理。
           cat > files/etc/uci-defaults/99-wifi-setup <<EOF
           #!/bin/sh
           for r in radio0 radio1; do
@@ -321,6 +331,67 @@ jobs:
           exit 0
           EOF
           chmod +x files/etc/uci-defaults/99-wifi-setup
+
+          # --- Argon 出厂默认内建壁纸（主人 2026-11-28 指定）。
+          # 根因：luci-app-argon-config 包自带 /etc/config/argon，写死 online_wallpaper='bing'，
+          # 主题模板 sysauth.ut 见非 none 就拉在线必应图，内置 bg1.jpg 被盖住。
+          # 这里用 zz- 前缀（字典序在包自带的 luci-argon-config 之后）首启覆盖成 none，
+          # 主题即回落 /www/luci-static/argon/img/bg1.jpg（已随 luci-theme-argon 编入固件）。
+          cat > files/etc/uci-defaults/zz-argon-wallpaper <<'EOF'
+          #!/bin/sh
+          uci -q set argon.@global[0].online_wallpaper='none'
+          uci -q commit argon
+          exit 0
+          EOF
+          chmod +x files/etc/uci-defaults/zz-argon-wallpaper
+
+          # --- zram 受控启动脚本（主人 2026-11-28 指定：省内存但不能撑爆 CPU）。
+          # 覆盖 zram-swap 包自带的 /etc/init.d/zram（files 层优先级高于包文件），
+          # 三道 CPU 保护：① 算法 lz4（最快）② 池子只开 96MB（约 40% 内存，不是全量 232MB）
+          # ③ sysctl swappiness=15（内存真紧张才换出，避免无谓压缩）。
+          # 原脚本默认算法 lzo、池子=全部 MemTotal，CPU 与内存占用都不可控，故替换。
+          cat > files/etc/init.d/zram <<'EOF'
+          #!/bin/sh /etc/rc.common
+          # 受控 zram：省内存 + 锁死 CPU 开销（主人 2026-11-28 指定）
+          START=15
+          ZRAM_DEV=/dev/zram0
+          ZRAM_SIZE_MB=96
+
+          start() {
+              [ -e /proc/swaps ] || { logger -t zram "kernel has no swap support"; return 1; }
+              grep -q zram /proc/swaps && { logger -t zram "zram swap already on"; return 0; }
+              [ -e "$ZRAM_DEV" ] || { logger -t zram "zram device missing"; return 1; }
+
+              # 算法：lz4 最快、最省 CPU（内核默认压缩器已设为 lz4）
+              local algo="lz4"
+              grep -qw "$algo" /sys/block/zram0/comp_algorithm 2>/dev/null && \
+                  echo "$algo" > /sys/block/zram0/comp_algorithm
+              uci -q set system.@system[0].zram_comp_algo="$algo"
+              uci -q commit system
+
+              # 池子限 96MB，避免全量内存开 zram 带来的额外占用
+              echo $(( ZRAM_SIZE_MB * 1024 * 1024 )) > /sys/block/zram0/disksize
+              mkswap "$ZRAM_DEV" >/dev/null 2>&1
+              swapon -p 100 "$ZRAM_DEV" >/dev/null 2>&1
+
+              # 换出门槛压低：内存紧张才压缩，平时不耗 CPU
+              sysctl -w vm.swappiness=15 >/dev/null 2>&1
+              logger -t zram "started: ${ZRAM_SIZE_MB}MB lz4 swap, swappiness=15"
+          }
+
+          stop() {
+              swapoff "$ZRAM_DEV" >/dev/null 2>&1
+              echo 1 > /sys/block/zram0/reset 2>/dev/null
+          }
+
+          status() {
+              [ -e /proc/swaps ] && grep zram /proc/swaps
+              [ -r /sys/block/zram0/mm_stat ] && cat /sys/block/zram0/mm_stat
+          }
+          EOF
+          chmod +x files/etc/init.d/zram
+          mkdir -p files/etc/rc.d
+          ln -sf ../init.d/zram files/etc/rc.d/S15zram
 
           # --- opkg 源出厂即为主人指定清单（静态文件，非 uci-defaults）。
           # distfeeds.conf = 腾讯镜像 lede releases/24.10.5 五条；customfeeds.conf = 仅 dllkids。
@@ -350,6 +421,10 @@ jobs:
           echo "=== wifi-setup uci-defaults (key line masked) ==="
           grep -v "^.*key=" files/etc/uci-defaults/99-wifi-setup
           grep -c "key=" files/etc/uci-defaults/99-wifi-setup
+          echo "=== zz-argon-wallpaper uci-defaults ==="
+          cat files/etc/uci-defaults/zz-argon-wallpaper
+          echo "=== zram controlled init (cpu-safe) ==="
+          grep -E 'START=|ZRAM_SIZE_MB|comp_algorithm|swappiness|swapon' files/etc/init.d/zram
           echo "=== distfeeds.conf ==="
           cat files/etc/opkg/distfeeds.conf
           echo "=== customfeeds.conf ==="
@@ -467,6 +542,8 @@ jobs:
       - name: Collect output
         run: |
           STAMP=$(date +%Y%m%d-%H%M)
+          # Release 标题用北京时间编译当天（runner 默认是 UTC，会差一天）
+          echo "BUILD_DATE=$(TZ=Asia/Shanghai date +%Y-%m-%d)" >> "$GITHUB_ENV"
           mkdir -p out
           cp -r openwrt/bin/targets/mediatek/filogic/* out/
           rm -rf out/packages out/sha256sums out/config.buildinfo out/feeds.buildinfo out/manifest out/version.buildinfo
@@ -486,33 +563,15 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: lean-final-build-${{ github.run_number }}
-          name: "AX3000T LEDE 最终版(passwall+Argon+BBR+autoreboot 纯净 内核6.12) lean-final-build-${{ github.run_number }}"
+          name: "AX3000T - lede固件 - ${{ env.BUILD_DATE }}"
           body: |
-            lede (coolsnowwolf/lede) master 滚动最新 + 原生大分区 xiaomi_mi-router-ax3000t。
-            内核 pin 6.12；已打 NMBM 双补丁 + mac80211 backports 6.12 修复（同已验证成功版）。
-
-            最终版（主人 2026-11-27 指定）：纯净系统，插件只有 4 样：
-              - PassWall（内核只留 sing-box + geoview + chinadns-ng，nftables 透明代理）
-              - Argon 主题 + argon-config（内建壁纸，无自定义覆盖）
-              - BBR（procd S98 开机自启，modprobe 先于 sysctl）
-              - 定时重启（luci-app-autoreboot）
-            出厂即带：
-              - LAN 默认 192.168.31.1
-              - root 密码 / WiFi（ESSID Xiaomi_14D3，双频同名 WPA2）编译内置
-              - /etc/opkg/distfeeds.conf = 腾讯镜像 lede releases/24.10.5 五条源
-              - /etc/opkg/customfeeds.conf = 仅 dllkids 一条源
-            不编进固件：ttyd / frpc / ddnsto / ddns / UPnP / arpbind / eqos / mwan3 /
-              homeproxy / mosdns / turboacc / xray / vlmcsd / oaf / openclash 等一切其余插件。
-
-            刷机后验收命令：
-              uname -r                                  → 6.12.x
-              sysctl net.ipv4.tcp_congestion_control    → bbr
-              logread | grep bbr-enable                 → applied: bbr
-              uci get network.lan.ipaddr                → 192.168.31.1
-              cat /etc/opkg/distfeeds.conf              → 腾讯镜像五条
-              cat /etc/opkg/customfeeds.conf            → 仅 dllkids
-              uci get wireless.default_radio0.ssid      → Xiaomi_14D3
-              opkg update                               → 全绿
+            固件插件说明：
+            - PassWall          （luci-app-passwall）
+            - Argon             （luci-app-argon-config）
+            - BBR               （kmod-tcp-bbr）
+            - 定时重启          （luci-app-autoreboot）
+            - ttyd              （luci-app-ttyd）
+            - zram              （zram-swap）
           files: out/*
           make_latest: false
           fail_on_unmatched_files: true
