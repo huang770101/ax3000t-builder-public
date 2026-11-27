@@ -4,6 +4,7 @@ name: Build LEDE AX3000T (kernel 6.12 / big-partition / passwall + ttyd / BBR fi
 # 本次按主人 2026-11-27 二修订：去 frpc / vlmcsd；加 luci-app-ttyd；根治 BBR 开机没加载。
 #   - frpc/vlmcsd 不编（显式 not set + 闸门拦截，防 zh_Hans/依赖拉回）。
 #   - ttyd: 官方包 luci-app-ttyd（依赖 ttyd 自动带入）。
+#   - LAN 默认地址: uci-defaults 内置 192.168.31.1（首启生效，刷机即 31.1）。
 #   - BBR 根治: 旧 uci-defaults 只在首启跑且不先 modprobe -> tcp_congestion_control=bbr
 #     写入时内核还没 bbr 算法，回落 cubic。改为 procd init 脚本 START=98，
 #     开机先 modprobe tcp_bbr 再 sysctl 设 bbr；刷机即自带，每次开机生效。
@@ -272,12 +273,26 @@ jobs:
           exit 0
           EOF
           chmod +x files/etc/uci-defaults/99-enable-bbr
+
+          # --- Default LAN IP 192.168.31.1 (主人 2026-11-27 要求编译内置).
+          # Avoids conflict with the modem's management subnet on the
+          # 192.168.1.x default; runs once on first boot via uci-defaults.
+          cat > files/etc/uci-defaults/99-lan-ip <<'EOF'
+          #!/bin/sh
+          uci -q set network.lan.ipaddr='192.168.31.1'
+          uci -q commit network
+          exit 0
+          EOF
+          chmod +x files/etc/uci-defaults/99-lan-ip
+
           echo "=== bbr-enable init script ==="
           cat files/etc/init.d/bbr-enable
           echo "=== rc.d symlink ==="
           ls -l files/etc/rc.d/S98bbr-enable
           echo "=== uci-defaults fallback ==="
           cat files/etc/uci-defaults/99-enable-bbr
+          echo "=== lan-ip uci-defaults ==="
+          cat files/etc/uci-defaults/99-lan-ip
 
       - name: Restore downloads cache
         uses: actions/cache/restore@v4
@@ -415,7 +430,7 @@ jobs:
             lede (coolsnowwolf/lede) master 滚动最新 + 原生大分区 xiaomi_mi-router-ax3000t。
             内核 pin 6.12；已打 NMBM 双补丁 + mac80211 backports 6.12 修复（同已验证成功版）。
 
-            基于已成功的 passwall 版，按主人 2026-11-27 二修订：去 frpc/vlmcsd、加 ttyd、根治 BBR 开机没加载。
+            基于已成功的 passwall 版，按主人 2026-11-27 二修订：去 frpc/vlmcsd、加 ttyd、根治 BBR 开机没加载、LAN 默认地址内置 192.168.31.1。
             代理：passwall 26.11.23，nftables 透明代理（带 kmod-nft-socket/tproxy/nat）；
             内核只留 sing-box 1.14.4 + geoview 0.2.9 + chinadns-ng（硬依赖），
             其余内核（xray/ss/ssr/hysteria/naiveproxy/smartdns 等）全部不编。
@@ -425,6 +440,7 @@ jobs:
             （只首启跑且不先 modprobe → bbr 写不进去回落 cubic）。刷机即自带、每次开机生效，无需手动补。
             网页终端：luci-app-ttyd（官方包，网页版命令行）。
             其它插件：Argon 主题 + BBR + autoreboot。
+            LAN 默认地址：192.168.31.1（编译内置 uci-defaults，刷机后 LuCI 访问 http://192.168.31.1）。
             不编：homeproxy / filetransfer / mosdns / frpc / vlmcsd / turboacc / xray / ipv6helper。
             软件源：编译源头已摘除 3 条 404 坏源（video + passwall_luci + passwall_packages，
             后者两条用 CONFIG_FEED_*=m 生成注释行），出厂 opkg update 全绿。
@@ -434,6 +450,7 @@ jobs:
               df -h /overlay                            → 看剩余空间
               sysctl net.ipv4.tcp_congestion_control    → bbr（本次重点修复项）
               logread | grep bbr-enable                 → applied: bbr（开机自启证据）
+              uci get network.lan.ipaddr                → 192.168.31.1（首启 uci-defaults 生效）
               ps w | grep sing-box                      → passwall 未在 LuCI 启用前无进程属正常
               opkg update                               → 全部 Updated、无 404
             DNS 配置提醒：不装 mosdns，转发链只有 dnsmasq → chinadns-ng，比三件套版简单。
