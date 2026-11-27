@@ -1,11 +1,16 @@
-name: Build LEDE AX3000T (kernel 6.12 / big-partition / passwall + frpc)
+name: Build LEDE AX3000T (kernel 6.12 / big-partition / passwall + ttyd / BBR fix)
 
-# 基于 build-lean-612pw.yml（已编译成功的 passwall 版）。
-# 本次按主人 2026-11-27 确认单：去 mosdns、加 frpc 0.72.0（不要中文语言包）；其余不变。
+# 基于 build-lean-612pw.yml（已编译成功的 passwall 版 + frpc 版）。
+# 本次按主人 2026-11-27 二修订：去 frpc / vlmcsd；加 luci-app-ttyd；根治 BBR 开机没加载。
+#   - frpc/vlmcsd 不编（显式 not set + 闸门拦截，防 zh_Hans/依赖拉回）。
+#   - ttyd: 官方包 luci-app-ttyd（依赖 ttyd 自动带入）。
+#   - BBR 根治: 旧 uci-defaults 只在首启跑且不先 modprobe -> tcp_congestion_control=bbr
+#     写入时内核还没 bbr 算法，回落 cubic。改为 procd init 脚本 START=98，
+#     开机先 modprobe tcp_bbr 再 sysctl 设 bbr；刷机即自带，每次开机生效。
 # 内核只留 sing-box / geoview / chinadns-ng；feed 加 passwall_packages + passwall_luci。
 # 摘源：① video（第7条 404 坏源）注释；② passwall 两条源用 CONFIG_FEED_*=m 生成注释行，
 # 出厂固件 distfeeds.conf 就不带 404 坏源（opkg update 全绿）。
-# 内核/patch/BBR 注入全部沿用成功骨架。tag = lean-612pw-frpc-build-N。
+# tag = lean-612pw-bbrttyd-build-N。
 
 on:
   workflow_dispatch:
@@ -151,48 +156,18 @@ jobs:
               echo "!! $p package missing from enabled feeds"; exit 1; }
             echo "  OK $p available"
           done
-          # frpc/frp comes from lede's own packages feed
-          test -f package/feeds/packages/frp/Makefile || { echo "!! frp Makefile missing"; exit 1; }
-          echo "  OK frp (frpc) available"
+          # ttyd comes from luci feed; the ttyd binary from packages feed
+          test -f package/feeds/luci/luci-app-ttyd/Makefile || { echo "!! luci-app-ttyd Makefile missing"; find feeds -path '*luci-app-ttyd/Makefile' 2>/dev/null; exit 1; }
+          echo "  OK luci-app-ttyd available"
+          test -f package/feeds/packages/ttyd/Makefile || { echo "!! ttyd binary Makefile missing"; find feeds -path '*/ttyd/Makefile' 2>/dev/null; exit 1; }
+          echo "  OK ttyd binary available"
 
-      - name: "Bump frp to 0.72.0 (Lean feed ships 0.70.1)"
-        working-directory: openwrt
-        run: |
-          # Verified in prior lean-build-3: go.mod needs go 1.26 (Lean golang = 1.27.3),
-          # front-end build identical across versions. Patch PKG_VERSION + PKG_HASH.
-          python3 - <<'PYEOF'
-          p = 'feeds/packages/net/frp/Makefile'
-          s = open(p).read()
-          oldv, newv = '0.70.1', '0.72.0'
-          oldh = '67246606f504cb15df72193f1a83911259e92b6a87838cff8850031efd406dc8'
-          newh = '20e2249c2b17cb7624317b0a9a0baed06c80c547d27568d18a32c78e46d79230'
-          assert 'PKG_VERSION:='+oldv in s, '!! frp version pattern not found (upstream moved)'
-          assert 'PKG_HASH:='+oldh in s, '!! frp hash pattern not found (upstream moved)'
-          s = s.replace('PKG_VERSION:='+oldv, 'PKG_VERSION:='+newv, 1)
-          s = s.replace('PKG_HASH:='+oldh, 'PKG_HASH:='+newh, 1)
-          open(p, 'w').write(s)
-          print('patched', p, '->', newv)
-          PYEOF
-          grep -E 'PKG_VERSION:=|PKG_HASH:=' feeds/packages/net/frp/Makefile | head -2
-
-      - name: "Load config (passwall + frpc version) + strict gate"
+      - name: "Load config (passwall + ttyd) + strict gate"
         working-directory: openwrt
         run: |
           cp ../config/ax3000t-lean-612pw.config .config
           make defconfig
           grep -q "DEVICE_${DEVICE}=y" .config || { echo "!! device not selected"; exit 1; }
-
-          # --- Drop frpc zh-cn language pack AFTER defconfig.
-          # Global CONFIG_LUCI_LANG_zh_Hans=y auto-selects ALL luci-i18n-*-zh-cn at
-          # defconfig time, overriding the seed config's "is not set" for frpc.
-          # Remove ONLY frpc's pack (stale/incomplete translation); keep passwall/argon
-          # zh-cn. No second defconfig below, so it stays off through compile.
-          if grep -q '^CONFIG_PACKAGE_luci-i18n-frpc-zh-cn=y$' .config; then
-            sed -i 's/^CONFIG_PACKAGE_luci-i18n-frpc-zh-cn=y$/# CONFIG_PACKAGE_luci-i18n-frpc-zh-cn is not set/' .config
-            echo "  removed frpc zh-cn (auto-selected by global zh_Hans)"
-          fi
-          grep -q '^CONFIG_PACKAGE_luci-i18n-frpc-zh-cn=y$' .config && { echo "!! frpc zh-cn still on"; exit 1; }
-          echo "  OK  frpc zh-cn forced off"
 
           # --- Force passwall opkg runtime feeds to commented form (=m) AFTER defconfig.
           # Some OpenWrt versions normalize CONFIG_FEED_* in defconfig; re-assert here.
@@ -220,18 +195,12 @@ jobs:
 
           echo "=== required packages (must all be present) ==="
           for p in luci-app-passwall sing-box geoview chinadns-ng \
-                   frpc luci-app-frpc firewall4 kmod-nft-socket kmod-nft-tproxy kmod-nft-nat \
+                   firewall4 kmod-nft-socket kmod-nft-tproxy kmod-nft-nat \
                    luci-theme-argon luci-app-argon-config kmod-tcp-bbr \
-                   luci-app-autoreboot luci-app-vlmcsd vlmcsd; do
+                   luci-app-autoreboot luci-app-ttyd ttyd; do
             grep -q "CONFIG_PACKAGE_${p}=y" .config || { echo "!! required package missing: $p"; grep -E "CONFIG_PACKAGE_${p}" .config || true; exit 1; }
             echo "  OK  $p"
           done
-
-          echo "=== unwanted: frpc zh-cn language pack (old/incomplete translation) ==="
-          if grep -qE '^CONFIG_PACKAGE_luci-i18n-frpc-zh-cn=y$' .config; then
-            echo "!! frpc zh-cn language pack sneaked in (global zh_Hans auto-pull)"; exit 1
-          fi
-          echo "  OK  no frpc zh-cn language pack"
 
           echo "=== passwall core selection (must be exactly sing-box + geoview) ==="
           grep -q '^CONFIG_PACKAGE_luci-app-passwall_INCLUDE_SingBox=y$' .config || { echo "!! SingBox switch missing"; exit 1; }
@@ -241,12 +210,12 @@ jobs:
 
           echo "=== unwanted packages (must all be absent) ==="
           echo "--- diagnostic: all proxy-core related lines in .config ---"
-          grep -iE 'xray|shadowsock|hysteria|naiveproxy|smartdns|haproxy|simple-obfs|v2ray|turboacc|homeproxy|mosdns|frps' .config || true
-          # frpc/luci-app-frpc are now REQUIRED (removed from this deny-list).
-          # mosdns/luci-app-mosdns + frps added to deny-list (must not sneak back in).
-          if grep -qE '^CONFIG_PACKAGE_(luci-app-homeproxy|luci-app-passwall2|luci-app-filetransfer|mosdns|luci-app-mosdns|luci-i18n-mosdns-zh-cn|frps|luci-app-frps|luci-i18n-frpc-zh-cn|luci-app-turboacc|xray-core|xray-plugin|v2ray-plugin|ipv6helper|firewall|smartdns|shadowsocks-rust-sslocal|shadowsocksr-libev-ssr-local|naiveproxy|hysteria|haproxy|simple-obfs-client|shadow-tls)=y' .config; then
+          grep -iE 'xray|shadowsock|hysteria|naiveproxy|smartdns|haproxy|simple-obfs|v2ray|turboacc|homeproxy|mosdns|frp|vlmcsd' .config || true
+          # 2026-11-27 二修订: frpc / vlmcsd removed -> add to deny-list so they
+          # cannot sneak back via global zh_Hans or dependency resolution.
+          if grep -qE '^CONFIG_PACKAGE_(luci-app-homeproxy|luci-app-passwall2|luci-app-filetransfer|mosdns|luci-app-mosdns|luci-i18n-mosdns-zh-cn|frpc|luci-app-frpc|luci-i18n-frpc-zh-cn|frps|luci-app-frps|luci-app-vlmcsd|vlmcsd|luci-app-turboacc|xray-core|xray-plugin|v2ray-plugin|ipv6helper|firewall|smartdns|shadowsocks-rust-sslocal|shadowsocksr-libev-ssr-local|naiveproxy|hysteria|haproxy|simple-obfs-client|shadow-tls)=y' .config; then
             echo "!! an unwanted package sneaked in:"
-            grep -E '^CONFIG_PACKAGE_(luci-app-homeproxy|luci-app-passwall2|luci-app-filetransfer|mosdns|luci-app-mosdns|luci-i18n-mosdns-zh-cn|frps|luci-app-frps|luci-i18n-frpc-zh-cn|luci-app-turboacc|xray-core|xray-plugin|v2ray-plugin|ipv6helper|firewall|smartdns|shadowsocks-rust-sslocal|shadowsocksr-libev-ssr-local|naiveproxy|hysteria|haproxy|simple-obfs-client|shadow-tls)=y' .config
+            grep -E '^CONFIG_PACKAGE_(luci-app-homeproxy|luci-app-passwall2|luci-app-filetransfer|mosdns|luci-app-mosdns|luci-i18n-mosdns-zh-cn|frpc|luci-app-frpc|luci-i18n-frpc-zh-cn|frps|luci-app-frps|luci-app-vlmcsd|vlmcsd|luci-app-turboacc|xray-core|xray-plugin|v2ray-plugin|ipv6helper|firewall|smartdns|shadowsocks-rust-sslocal|shadowsocksr-libev-ssr-local|naiveproxy|hysteria|haproxy|simple-obfs-client|shadow-tls)=y' .config
             exit 1
           fi
           if grep -qE '^CONFIG_PACKAGE_luci-app-passwall_(Iptables_Transparent_Proxy|INCLUDE_(SmartDNS|Haproxy|Hysteria|NaiveProxy|Shadowsocks_Rust_Client|Shadowsocks_Rust_Server|ShadowsocksR_Libev_Client|ShadowsocksR_Libev_Server|Shadow_TLS|Simple_Obfs|V2ray_Geodata|V2ray_Plugin|Xray|Xray_Plugin))=y' .config; then
@@ -261,24 +230,53 @@ jobs:
           echo "=== total selected packages ==="
           grep -cE '^CONFIG_PACKAGE_.*=y$' .config
 
-      - name: "Inject BBR enable into rootfs (uci-defaults, boot enabled)"
+      - name: "Inject BBR boot enable (procd init START=98, modprobe first)"
         working-directory: openwrt
         run: |
-          # OpenWrt init reads /etc/sysctl.conf (not necessarily /etc/sysctl.d),
-          # so append there on first boot and apply immediately - same as the
-          # manual enable done on the running router.
-          mkdir -p files/etc/uci-defaults
+          # ROOT CAUSE of "BBR never active at boot" in all prior builds:
+          #   The old uci-defaults script runs ONCE on first boot, and does NOT
+          #   modprobe tcp_bbr first. Writing sysctl net.ipv4.tcp_congestion_control=bbr
+          #   before the bbr algorithm is registered in the kernel silently fails
+          #   -> falls back to cubic. sysctl.conf is also read too early (START=11).
+          # FIX (identical to the manual fix verified on the running router 2026-11-26):
+          #   ship a procd init script with START=98 (runs late, after kmods load),
+          #   which modprobe's tcp_bbr THEN sets fq + bbr. Enabled at build time so
+          #   /etc/rc.d/S98bbr-enable exists -> runs on EVERY boot, no manual patch.
+          mkdir -p files/etc/init.d
+          cat > files/etc/init.d/bbr-enable <<'EOF'
+          #!/bin/sh /etc/rc.common
+          # Enable BBR at boot, after kmod-tcp-bbr is loadable. START=98 is late
+          # enough (sysctl.conf default START=11 is too early -> cubic fallback).
+          START=98
+
+          start() {
+              modprobe tcp_bbr 2>/dev/null
+              sysctl -w net.core.default_qdisc=fq >/dev/null 2>&1
+              sysctl -w net.ipv4.tcp_congestion_control=bbr >/dev/null 2>&1
+              logger -t bbr-enable "applied: $(cat /proc/sys/net/ipv4/tcp_congestion_control 2>/dev/null)"
+          }
+          EOF
+          chmod +x files/etc/init.d/bbr-enable
+          # Belt-and-suspenders enable:
+          #  1) pre-create S98 symlink now (in case files/ copy preserves symlinks).
+          #  2) uci-defaults calls `/etc/init.d/bbr-enable enable` on first boot to
+          #     recreate it if the symlink did not survive the rootfs copy.
+          # Once S98bbr-enable exists it runs on EVERY boot via procd.
+          mkdir -p files/etc/rc.d files/etc/uci-defaults
+          ln -sf ../init.d/bbr-enable files/etc/rc.d/S98bbr-enable
           cat > files/etc/uci-defaults/99-enable-bbr <<'EOF'
           #!/bin/sh
-          grep -q '^net.ipv4.tcp_congestion_control' /etc/sysctl.conf || \
-            echo 'net.ipv4.tcp_congestion_control = bbr' >> /etc/sysctl.conf
-          grep -q '^net.core.default_qdisc' /etc/sysctl.conf || \
-            echo 'net.core.default_qdisc = fq' >> /etc/sysctl.conf
-          sysctl -w net.core.default_qdisc=fq >/dev/null 2>&1
-          sysctl -w net.ipv4.tcp_congestion_control=bbr >/dev/null 2>&1
+          # Only registers the init script (does NOT set sysctl here - too early).
+          # The actual modprobe+sysctl happens in S98bbr-enable on every boot.
+          /etc/init.d/bbr-enable enable >/dev/null 2>&1
           exit 0
           EOF
           chmod +x files/etc/uci-defaults/99-enable-bbr
+          echo "=== bbr-enable init script ==="
+          cat files/etc/init.d/bbr-enable
+          echo "=== rc.d symlink ==="
+          ls -l files/etc/rc.d/S98bbr-enable
+          echo "=== uci-defaults fallback ==="
           cat files/etc/uci-defaults/99-enable-bbr
 
       - name: Restore downloads cache
@@ -411,28 +409,31 @@ jobs:
       - name: Publish release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: lean-612pw-frpc-build-${{ github.run_number }}
-          name: "AX3000T LEDE 正式版(passwall版 内核6.12+大分区+sing-box/geoview/chinadns-ng+frpc0.72.0) lean-612pw-frpc-build-${{ github.run_number }}"
+          tag_name: lean-612pw-bbrttyd-build-${{ github.run_number }}
+          name: "AX3000T LEDE 正式版(passwall版 内核6.12+大分区+sing-box/geoview/chinadns-ng+BBR修复+ttyd) lean-612pw-bbrttyd-build-${{ github.run_number }}"
           body: |
             lede (coolsnowwolf/lede) master 滚动最新 + 原生大分区 xiaomi_mi-router-ax3000t。
             内核 pin 6.12；已打 NMBM 双补丁 + mac80211 backports 6.12 修复（同已验证成功版）。
 
-            基于已成功的 passwall 版，按主人 2026-11-27 要求：去 mosdns、加 frpc 0.72.0，其余不变。
+            基于已成功的 passwall 版，按主人 2026-11-27 二修订：去 frpc/vlmcsd、加 ttyd、根治 BBR 开机没加载。
             代理：passwall 26.11.23，nftables 透明代理（带 kmod-nft-socket/tproxy/nat）；
             内核只留 sing-box 1.14.4 + geoview 0.2.9 + chinadns-ng（硬依赖），
             其余内核（xray/ss/ssr/hysteria/naiveproxy/smartdns 等）全部不编。
             DNS：不装 mosdns，由 passwall 的 chinadns-ng 自己管（dnsmasq → chinadns-ng）。
-            内网穿透：frpc 0.72.0（Lean feed 默认 0.70.1，已 bump）+ luci-app-frpc；
-            **不装 frpc 中文语言包**（老版本翻译不全，主人明确不要），界面为英文。
-            其它插件：Argon 主题 + BBR(开机自启) + autoreboot + vlmcsd。
-            不编：homeproxy / filetransfer / mosdns / turboacc / xray / ipv6helper。
+            **BBR 根治**：内置 procd init `/etc/init.d/bbr-enable`（START=98），开机先
+            `modprobe tcp_bbr` 再设 `net.ipv4.tcp_congestion_control=bbr`；替代旧 uci-defaults
+            （只首启跑且不先 modprobe → bbr 写不进去回落 cubic）。刷机即自带、每次开机生效，无需手动补。
+            网页终端：luci-app-ttyd（官方包，网页版命令行）。
+            其它插件：Argon 主题 + BBR + autoreboot。
+            不编：homeproxy / filetransfer / mosdns / frpc / vlmcsd / turboacc / xray / ipv6helper。
             软件源：编译源头已摘除 3 条 404 坏源（video + passwall_luci + passwall_packages，
             后者两条用 CONFIG_FEED_*=m 生成注释行），出厂 opkg update 全绿。
 
             刷机后验收命令：
               uname -r                                  → 6.12.x
               df -h /overlay                            → 看剩余空间
-              sysctl net.ipv4.tcp_congestion_control    → bbr
+              sysctl net.ipv4.tcp_congestion_control    → bbr（本次重点修复项）
+              logread | grep bbr-enable                 → applied: bbr（开机自启证据）
               ps w | grep sing-box                      → passwall 未在 LuCI 启用前无进程属正常
               opkg update                               → 全部 Updated、无 404
             DNS 配置提醒：不装 mosdns，转发链只有 dnsmasq → chinadns-ng，比三件套版简单。
