@@ -144,6 +144,26 @@ jobs:
           ./scripts/feeds update -a
           ./scripts/feeds install -a
 
+          # luci-app-eqos (coolsnowwolf/luci 25.12) depends on two Qualcomm-only
+          # kmods (kmod-qca-nss-drv-qdisc / kmod-qca-nss-drv-igs) that don't exist
+          # for mediatek/MT7981 -> make defconfig silently DROPS the =y selection.
+          # Patch LUCI_DEPENDS down to generic tc stack; eqos works fine on MT7981.
+          python3 - <<'PYEOF'
+          p = 'feeds/luci/applications/luci-app-eqos/Makefile'
+          s = open(p).read()
+          old = 'LUCI_DEPENDS:=+tc +kmod-sched-core +kmod-ifb +kmod-qca-nss-drv-qdisc +kmod-qca-nss-drv-igs'
+          new = 'LUCI_DEPENDS:=+tc +kmod-sched-core +kmod-ifb'
+          if old in s:
+              s = s.replace(old, new, 1)
+              open(p, 'w').write(s)
+              print('patched eqos deps (dropped QCA NSS kmods)')
+          elif new in s:
+              print('eqos deps already patched')
+          else:
+              raise SystemExit('!! eqos Makefile pattern not found - upstream moved')
+          PYEOF
+          grep -n 'LUCI_DEPENDS' feeds/luci/applications/luci-app-eqos/Makefile
+
           # passwall marks many proxy cores "default y if aarch64"
           # (Xray / SSR / SimpleObfs / V2rayPlugin / Haproxy / SmartDNS...).
           # make defconfig turns them on even with "is not set" in the seed config.
