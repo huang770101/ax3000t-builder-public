@@ -49,7 +49,7 @@ jobs:
           sudo apt-get update
           sudo apt-get -y install build-essential clang flex bison g++ gawk gcc gettext git \
             libncurses-dev libssl-dev libelf-dev make python3 python-is-python3 rsync unzip \
-            zlib1g-dev file swig wget curl
+            zlib1g-dev file swig wget curl zstd
 
       - name: Clone source (lede master, rolling - no commit pin)
         run: |
@@ -545,8 +545,11 @@ jobs:
           # Update/install ONLY the feeds added in this phase (helloworld/qmodem/third_*).
           # `update -a` would hit the locally-patched feeds (luci eqos, ddnsto 4.2.9)
           # and git pull --rebase dies on a dirty tree. Base feeds already installed.
-          PB_FEEDS=$(grep -oE '^src-git [a-zA-Z0-9_]+' feeds.conf.default | awk '{print $2}' | grep -E '^(third_|helloworld|qmodem)$')
-          echo "phase-B feeds: $PB_FEEDS"
+          # 2026-11-27 Run#15 修复：原写法 '^(third_|...)$' 中 third_ 后被 $ 锚死，
+          # third_xxx 整行不匹配 → 56 个第三方 feed 全没 update/install。
+          PB_FEEDS=$(grep -oE '^src-git [a-zA-Z0-9_]+' feeds.conf.default | awk '{print $2}' | grep -E '^(third_[A-Za-z0-9_]+|helloworld|qmodem)$')
+          echo "phase-B feeds: $PB_FEEDS" | tr '\n' ' '; echo
+          echo "phase-B feed count: $(echo $PB_FEEDS | wc -w)"
           ./scripts/feeds update $PB_FEEDS
           ./scripts/feeds install $PB_FEEDS
           # 把两批第三方源全部标记 =m + mihomo/frpc 插件显式 =m
@@ -600,34 +603,60 @@ jobs:
           echo "=== published ipks: $(ls /tmp/feedpub | wc -l) (files >90M excluded to satisfy GitHub 100MB limit) ==="
           cd /tmp/feedpub
           python3 - <<'PYEOF'
-          import tarfile, io, gzip, hashlib, os, re
+          import tarfile, io, gzip, hashlib, os, re, subprocess
+          # 2026-11-27 Run#15 修复：lede master 的 ipk 已改为 tar.gz 新格式
+          # （1f8b 头，成员 ./debian-binary ./control.tar.gz ./data.tar.gz），
+          # 老解析器只认 ar(!<arch>) → 288 个 ipk 全跳过、Packages 索引 0 字节。
+          # 现在两种格式都解析：ar 老格式 + tar.gz 新格式（内层 gzip/zstd）。
+          ZSTD_MAGIC = b'\x28\xb5\x2f\xfd'
+          def extract_control(data, fn):
+              # 新格式：tar.gz 外壳
+              if data[:2] == b'\x1f\x8b':
+                  t = tarfile.open(fileobj=io.BytesIO(data), mode='r:gz')
+                  for cand in t.getnames():
+                      if cand.strip('./') in ('control.tar.gz', 'control.tar.zst'):
+                          blob = t.extractfile(cand).read()
+                          if blob[:4] == ZSTD_MAGIC:
+                              blob = subprocess.run(['zstd', '-d'], input=blob,
+                                                    capture_output=True, check=True).stdout
+                          inner = tarfile.open(fileobj=io.BytesIO(blob), mode='r:*')
+                          mem = [m for m in inner.getmembers()
+                                 if os.path.basename(m.name) == 'control'][0]
+                          return inner.extractfile(mem).read().decode(errors='replace')
+                  return None
+              # 老格式：ar 归档
+              if data[:8] == b'!<arch>\n':
+                  pos = 8
+                  while pos < len(data):
+                      hdr = data[pos:pos+60]
+                      try:
+                          name = hdr[:16].decode().strip().rstrip('/')
+                          size = int(hdr[48:58].decode().strip())
+                      except Exception:
+                          break
+                      blob = data[pos+60:pos+60+size]
+                      pos += 60 + size
+                      if pos % 2: pos += 1
+                      if name in ('control.tar.gz', 'control.tar.zst'):
+                          if blob[:4] == ZSTD_MAGIC:
+                              blob = subprocess.run(['zstd', '-d'], input=blob,
+                                                    capture_output=True, check=True).stdout
+                          tar = tarfile.open(fileobj=io.BytesIO(blob), mode='r:*')
+                          mem = [m for m in tar.getmembers()
+                                 if os.path.basename(m.name) == 'control'][0]
+                          return tar.extractfile(mem).read().decode(errors='replace')
+                  return None
+              return None
           entries = []
           for fn in sorted(os.listdir('.')):
               if not fn.endswith('.ipk'):
                   continue
               data = open(fn, 'rb').read()
-              if data[:8] != b'!<arch>\n':
-                  continue
-              pos, control = 8, None
-              while pos < len(data):
-                  hdr = data[pos:pos+60]
-                  try:
-                      name = hdr[:16].decode().strip().rstrip('/')
-                      size = int(hdr[48:58].decode().strip())
-                  except Exception:
-                      break
-                  blob = data[pos+60:pos+60+size]
-                  pos += 60 + size
-                  if pos % 2: pos += 1
-                  if name in ('control.tar.gz', 'control.tar.zst'):
-                      try:
-                          tar = tarfile.open(fileobj=io.BytesIO(blob), mode='r:*')
-                          mem = [m for m in tar.getmembers() if os.path.basename(m.name) == 'control'][0]
-                          control = tar.extractfile(mem).read().decode(errors='replace')
-                      except Exception as e:
-                          print('skip', fn, str(e)[:60])
-                          control = None
-                      break
+              try:
+                  control = extract_control(data, fn)
+              except Exception as e:
+                  print('skip', fn, str(e)[:60])
+                  control = None
               if not control:
                   continue
               fields = dict(l.split(': ', 1) for l in control.splitlines() if ': ' in l)
