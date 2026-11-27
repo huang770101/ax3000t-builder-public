@@ -164,6 +164,26 @@ jobs:
           PYEOF
           grep -n 'LUCI_DEPENDS' feeds/luci/applications/luci-app-eqos/Makefile
 
+          # ddnsto feed (linkease/ddnsto-openwrt) pins 0.3.0 from firmware.koolshare.cn
+          # which is DEAD (connection reset / html error page) -> make fails at download.
+          # Replace with linkease/nas-packages ddnsto 4.2.9 (pinned commit 2d36b43d5ea6,
+          # active URL fw0.koolcenter.com) + our release asset as extra fallback mirror.
+          NAS_DDNSTO="https://raw.githubusercontent.com/linkease/nas-packages/2d36b43d5ea6/network/services/ddnsto"
+          mkdir -p feeds/ddnsto_feed/ddnsto/files
+          curl -fsSL --retry 3 --connect-timeout 20 "$NAS_DDNSTO/Makefile" -o feeds/ddnsto_feed/ddnsto/Makefile
+          curl -fsSL --retry 3 --connect-timeout 20 "$NAS_DDNSTO/files/ddnsto.config" -o feeds/ddnsto_feed/ddnsto/files/ddnsto.config
+          curl -fsSL --retry 3 --connect-timeout 20 "$NAS_DDNSTO/files/ddnsto.init" -o feeds/ddnsto_feed/ddnsto/files/ddnsto.init
+          curl -fsSL --retry 3 --connect-timeout 20 "$NAS_DDNSTO/files/ddnsto.uci-default" -o feeds/ddnsto_feed/ddnsto/files/ddnsto.uci-default
+          # add our GitHub release mirror as fallback download source (koolcenter CDN may be flaky from runners)
+          sed -i 's|PKG_SOURCE_URL:=https://fw0.koolcenter.com/binary/ddnsto/linux-binary/|PKG_SOURCE_URL:=https://fw0.koolcenter.com/binary/ddnsto/linux-binary/ https://github.com/huang770101/ax3000t-builder-public/releases/download/ddnsto-dl|' feeds/ddnsto_feed/ddnsto/Makefile
+          sha256sum -c - <<'DDNSTO_SHA'
+          72c5ef96d6e035a2cea57a29b50eea4026b43ff6be242054cdae0753b53f8f4a  feeds/ddnsto_feed/ddnsto/Makefile
+          521664440d383bfba7a222d8ee31439788d0b7deb704db415e611e233d9d33c4  feeds/ddnsto_feed/ddnsto/files/ddnsto.config
+          173aeb613ed5ed4cd8720d8cf73b7cff33ee966b41c5325cba99a28ef7b87dbe  feeds/ddnsto_feed/ddnsto/files/ddnsto.init
+          4617da2d194cf4d82d951e9215107acfcb38e6899424ab96d3ec44ff36c4bcbd  feeds/ddnsto_feed/ddnsto/files/ddnsto.uci-default
+          DDNSTO_SHA
+          grep -E 'PKG_SOURCE_URL|PKG_HASH' feeds/ddnsto_feed/ddnsto/Makefile
+
           # passwall marks many proxy cores "default y if aarch64"
           # (Xray / SSR / SimpleObfs / V2rayPlugin / Haproxy / SmartDNS...).
           # make defconfig turns them on even with "is not set" in the seed config.
@@ -522,8 +542,13 @@ jobs:
           src-git third_atmaterial https://github.com/openwrt-develop/luci-theme-atmaterial.git
           src-git third_macvlan https://github.com/ParticleG/luci-app-macvlan.git
           FEEDS
-          ./scripts/feeds update -a
-          ./scripts/feeds install -a
+          # Update/install ONLY the feeds added in this phase (helloworld/qmodem/third_*).
+          # `update -a` would hit the locally-patched feeds (luci eqos, ddnsto 4.2.9)
+          # and git pull --rebase dies on a dirty tree. Base feeds already installed.
+          PB_FEEDS=$(grep -oE '^src-git [a-zA-Z0-9_]+' feeds.conf.default | awk '{print $2}' | grep -E '^(third_|helloworld|qmodem)$')
+          echo "phase-B feeds: $PB_FEEDS"
+          ./scripts/feeds update $PB_FEEDS
+          ./scripts/feeds install $PB_FEEDS
           # 把两批第三方源全部标记 =m + mihomo/frpc 插件显式 =m
           python3 - <<'PYEOF'
           feeds = ['helloworld', 'qmodem'] + \
