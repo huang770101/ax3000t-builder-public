@@ -157,12 +157,16 @@ jobs:
               echo "!! $p package missing from enabled feeds"; exit 1; }
             echo "  OK $p available"
           done
-          for p in luci-theme-argon luci-app-argon-config luci-app-autoreboot kmod-tcp-bbr; do
-            test -f "package/feeds/luci/$p/Makefile" || test -f "package/feeds/packages/$p/Makefile" || \
-            test -f "package/kernel/$p/Makefile" || test -f "package/$p/Makefile" || {
+          for p in luci-theme-argon luci-app-argon-config luci-app-autoreboot; do
+            test -f "package/feeds/luci/$p/Makefile" || test -f "package/feeds/packages/$p/Makefile" || {
               echo "!! $p missing"; exit 1; }
             echo "  OK $p available"
           done
+          # kmod-tcp-bbr 是内核核心包，定义在 package/kernel/linux/modules/netsupport.mk
+          # （无独立 Makefile 目录，不能进 feeds 可用性检查循环）
+          grep -q 'tcp-bbr' package/kernel/linux/modules/netsupport.mk || {
+            echo "!! kmod-tcp-bbr definition missing from netsupport.mk"; exit 1; }
+          echo "  OK kmod-tcp-bbr (kernel core pkg) available"
 
       - name: "Load config (final: passwall+argon+bbr+autoreboot) + strict gate"
         working-directory: openwrt
